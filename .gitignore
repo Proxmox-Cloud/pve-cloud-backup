@@ -1,0 +1,12 @@
+.backup-venv
+__pycache__
+.id_proxmox
+.id_qemu
+.pytest_cache
+.test-env.yaml
+.test-env-vars
+dist
+*.egg-info
+_version.py
+tdd-requirements.yml
+.envrc

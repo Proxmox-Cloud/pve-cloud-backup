@@ -1,0 +1,7 @@
+proxmoxer==2.2.0
+kubernetes==34.1.0
+PyYAML==6.0.2
+paramiko==4.0.0
+requests==2.32.5
+zstandard==0.25.0
+tinydb==4.8.2

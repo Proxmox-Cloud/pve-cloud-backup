@@ -1,0 +1,137 @@
+release_tag:
+  stage: build
+  image: alpine/git:v2.49.1
+  script:
+    # set config based on the current commit for auto commit
+    - git config --global user.name "$GITLAB_USER_NAME"
+    - git config --global user.email "$GITLAB_USER_EMAIL"
+
+    # get the latest tag => default to 0.0.0
+    - |
+      tags=$(git tag -l | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$')
+      if [ -z "$tags" ]; then
+        latest_tag="0.0.0"
+      else
+        latest_tag=$(echo "$tags" | sort -V | tail -n 1)
+      fi
+    
+    # split the tag and increment
+    - |
+      major=$(echo "$latest_tag" | cut -d '.' -f 1)
+      minor=$(echo "$latest_tag" | cut -d '.' -f 2)
+      patch=$(echo "$latest_tag" | cut -d '.' -f 3)
+
+      increment=${CI_COMMIT_TAG#release-}
+
+      if [ "$increment" == "major" ]; then
+        major=$((major + 1))
+        minor=0
+        patch=0
+      elif [ "$increment" == "minor" ]; then
+        minor=$((minor + 1))
+        patch=0
+      elif [ "$increment" == "patch" ]; then
+        patch=$((patch + 1))
+      else
+        echo "Unknown increment type: $increment"
+        exit 1
+      fi
+
+      new_tag="$major.$minor.$patch"
+
+      echo $new_tag
+
+    # write the tag to env file for next step
+    - echo "NEW_TAG=$new_tag" > tag.env
+
+    # tag and push => created by job ci token, will not trigger the tag released pipeline
+    - git tag "$new_tag" -m "$CI_COMMIT_TAG"
+    - git push origin "$new_tag"
+
+  artifacts: # workaround pass tag version
+    paths:
+      - tag.env
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^release-[a-z]+$/'
+
+
+# we use curl after creating the tag to invoke the pipeline since pushes
+# via the ci job token alone dont trigger additional pipelines
+trigger_version_tag:
+  stage: deploy
+  image: alpine/curl:8.14.1
+  dependencies:
+    - release_tag
+  script:
+    - source tag.env
+    # trigger the new pipeline manually as the ci token cannot https://gitlab.com/gitlab-org/gitlab/-/issues/569974
+    - |
+      curl --request POST \
+        --form "token=${CI_JOB_TOKEN}" \
+        --form "ref=${NEW_TAG}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/trigger/pipeline"
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^release-[a-z]+$/'
+
+
+release_image:
+  stage: deploy
+  image:
+    name: gcr.io/kaniko-project/executor:v1.13.0-debug
+    entrypoint: [""]
+  script:
+    # exit if ci vars are not defined for building
+    - |
+      if [ -z $DOCKER_AUTH_CONFIG_B64 ]; then
+        echo "Docker auth ci variable not defined!"
+        exit 0
+      fi
+    - echo $DOCKER_AUTH_CONFIG_B64 | base64 -d > /kaniko/.docker/config.json
+    - echo "__version__ = \"$CI_COMMIT_TAG\"" > src/pve_cloud_backup/_version.py # dynamic versioning
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "tobiashvmz/pve-cloud-backup:$CI_COMMIT_TAG"
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+$/'
+
+
+publish_pypi:
+  stage: deploy
+  image:
+    name: python:alpine3.19
+  script:
+    # exit if ci vars are not defined for building
+    - |
+      if [ -z $PYPI_TOKEN ]; then
+        echo "Pypi token ci variable not defined!"
+        exit 0
+      fi
+    - pip install build==1.3.0 twine==6.2.0
+    - echo "__version__ = \"$CI_COMMIT_TAG\"" > src/pve_cloud_backup/_version.py # dynamic versioning
+    - python3 -m build
+    - python3 -m twine upload dist/* -u __token__ -p $PYPI_TOKEN # skip gitlab oidc twine feature with -u and -p flags
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+$/' # semver
+
+
+downstream_pve_cloud:
+  stage: deploy
+  trigger:
+    project: "pve-cloud/pve_cloud"
+  variables:
+    PVE_CLOUD_BACKUP: $CI_COMMIT_TAG
+    UPSTREAM_TAG_MESSAGE: $CI_COMMIT_TAG_MESSAGE # here we store the type of the release (fuck gitlab premium feature needed to pass env)
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+$/' # semver
+
+
+downstream_tf_modules:
+  stage: deploy
+  trigger:
+    project: "pve-cloud/pve-cloud-tf"
+  variables:
+    PVE_CLOUD_BACKUP: $CI_COMMIT_TAG
+    UPSTREAM_TAG_MESSAGE: $CI_COMMIT_TAG_MESSAGE # here we store the type of the release (fuck gitlab premium feature needed to pass env)
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+$/' # semver

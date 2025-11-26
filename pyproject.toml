@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "py-pve-cloud-backup"
+authors = [{ name = "Tobias Huebner", email = "tobias.huebner@vmzberlin.com" }]
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+dynamic = ["dependencies", "version"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+version = {attr = "pve_cloud_backup._version.__version__"}
+
+[project.scripts]
+daemon = "pve_cloud_backup.daemon.bdd:main"
+brctl = "pve_cloud_backup.daemon.brctl:main"
+fetcher = "pve_cloud_backup.fetcher.main:main"
+

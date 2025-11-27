@@ -1,12 +1,25 @@
-variables:
-  INCLUDING_PROJECT_ID: $CI_PROJECT_ID
-  INCLUDING_JOB_TOKEN: $CI_JOB_TOKEN
-
 # default release tags
 include:
   - project: 'pve-cloud/pve-cloud-pipelines'
     file: 'release-tag.yml'
     ref: 'master'
+
+# trigger the new pipeline manually as the ci token cannot https://gitlab.com/gitlab-org/gitlab/-/issues/569974
+# also cannot put this include since CI variable evaluation is stupid
+trigger_version_tag:
+  stage: deploy
+  image: alpine/curl:8.14.1
+  dependencies:
+    - release_tag
+  script:
+    - |
+      curl --request POST \
+        --form "token=${CI_JOB_TOKEN}" \
+        --form "ref=${NEW_TAG}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/trigger/pipeline"
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^release-[a-z]+$/'    
+
 
 release_image:
   stage: deploy

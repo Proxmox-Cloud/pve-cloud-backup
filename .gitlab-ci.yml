@@ -1,26 +1,11 @@
-# default release tags
-include:
-  - project: 'pve-cloud/pve-cloud-pipelines'
-    file: 'release-tag.yml'
-    ref: 'master'
-
-# trigger the new pipeline manually as the ci token cannot https://gitlab.com/gitlab-org/gitlab/-/issues/569974
-# also cannot put this include since CI variable evaluation is stupid
-trigger_version_tag:
-  stage: deploy
-  image: alpine/curl:8.14.1
-  dependencies:
-    - release_tag
+release_tag:
+  stage: build
+  image: tobiashvmz/pve-cloud-ci:latest
   script:
-    - source tag.env
-    - |
-      curl --request POST \
-        --form "token=${CI_JOB_TOKEN}" \
-        --form "ref=${NEW_TAG}" \
-        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/trigger/pipeline"
+    - /scripts/release-tag.sh
   rules:
-    - if: '$CI_COMMIT_TAG =~ /^release-[a-z]+$/'    
-
+    - if: '$CI_COMMIT_TAG =~ /^release-[a-z]+$/'
+  resource_group: deploy-prod
 
 release_image:
   stage: deploy

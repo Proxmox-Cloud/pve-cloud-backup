@@ -5,6 +5,7 @@ include:
     ref: 'master'
     variables:
       INCLUDING_PROJECT_ID: $CI_PROJECT_ID
+      INCLUDING_JOB_TOKEN: $CI_JOB_TOKEN
 
 release_image:
   stage: deploy

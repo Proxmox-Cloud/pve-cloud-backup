@@ -3,7 +3,8 @@ include:
   - project: 'pve-cloud/pve-cloud-pipelines'
     file: 'release-tag.yml'
     ref: 'master'
-    
+    variables:
+      INCLUDING_PROJECT_ID: $CI_PROJECT_ID
 
 release_image:
   stage: deploy

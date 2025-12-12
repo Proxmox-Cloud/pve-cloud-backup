@@ -1,6 +1,6 @@
 release_tag:
   stage: build
-  image: tobiashvmz/pve-cloud-ci:latest
+  image: tobiashvmz/pve-cloud-ci:2025121214
   script:
     - /scripts/release-tag.sh
   rules:

@@ -70,7 +70,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
           raise Exception("Unknown backup type " + borg_archive_type)
   
         if borg_archive_type == "k8s":
-          backup_dir = f"k8s/" + req_dict["namespace"]
+          backup_dir = "k8s/" + req_dict["namespace"]
         else:
           backup_dir = borg_archive_type
 

@@ -19,9 +19,7 @@ build_commands = [
     "dist/py_pve_cloud_backup-$VERSION.tar.gz", "dist/py_pve_cloud_backup-$VERSION-py3-none-any.whl"
   ]
 ]
-version_py_path = "src/pve_cloud_backup/_version.py"
+dyn_version_py_path = "src/pve_cloud_backup/_version.py"
 
 [redis]
 version_key = "version.pve-cloud-backup"
-sub_rebuild_keys = []
-env_key_mapping = {}

@@ -63,7 +63,7 @@ downstream_pve_cloud:
 downstream_tf_backup_module:
   stage: deploy
   trigger:
-    project: "pve-cloud/terraform-proxmox-cloud-backup"
+    project: "pve-cloud/terraform-pxc-backup"
   variables:
     PVE_CLOUD_BACKUP: $CI_COMMIT_TAG
     UPSTREAM_TAG_MESSAGE: $CI_COMMIT_TAG_MESSAGE # here we store the type of the release

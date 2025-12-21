@@ -1,6 +1,6 @@
 release_tag:
   stage: build
-  image: tobiashvmz/pve-cloud-ci:2025122113
+  image: docker.io/tobiashvmz/pve-cloud-ci:2025122115
   script:
     - /scripts/release-tag.sh
   rules:

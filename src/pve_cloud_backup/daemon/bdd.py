@@ -47,16 +47,24 @@ def get_backup_base_dir():
     target_datastores = os.getenv("PXC_REMOVABLE_DATASTORES").split(",")
 
     # find the first datastore that matches env var
-    matching_datastore = None
+    matching_online_datastore = None
     for datastore in datastores:
       if datastore["name"] in target_datastores:
-        matching_datastore = datastore
-        break
+        result = subprocess.run(
+            ["findmnt", f"/mnt/datastore/{datastore['name']}"],
+            stdout=subprocess.PIPE,
+            text=True
+        )
+
+        # check if its mounted
+        if result.stdout.strip():
+          matching_online_datastore = datastore
+          break
     
-    if not matching_datastore:
+    if not matching_online_datastore:
       raise Exception("Could not find matching datastore!")
 
-    return f"/mnt/datastore/{matching_datastore['name']}/pxc"
+    return f"/mnt/datastore/{matching_online_datastore['name']}/pxc"
   elif os.getenv("PXC_BACKUP_BASE_DIR"):
     return os.getenv("PXC_BACKUP_BASE_DIR")
   else:

@@ -2,14 +2,15 @@ from tinydb import TinyDB
 import subprocess
 from pathlib import Path
 import logging
-from pve_cloud_backup.daemon.shared import IMAGE_META_DB_PATH, STACK_META_DB_PATH, BACKUP_BASE_DIR, copy_backup_generic
+
 import os
 from enum import Enum
 import asyncio
 import struct
 import pickle
 import zstandard as zstd
-
+import json
+import shutil
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -20,15 +21,6 @@ logger = logging.getLogger("bdd")
 ENV = os.getenv("ENV", "TESTING")
 
 BACKUP_TYPES = ["k8s", "nextcloud", "git", "postgres"]
-
-
-def init_backup_dir(backup_dir):
-  repo_path = f"{BACKUP_BASE_DIR}/borg-{backup_dir}"
-  Path(repo_path).mkdir(parents=True, exist_ok=True)
-
-  # init borg repo, is ok to fail if it already exists
-  subprocess.run(["borg", "init", "--encryption=none", repo_path])
-
 
 class Command(Enum):
   ARCHIVE = 1
@@ -44,6 +36,58 @@ def get_lock(backup_dir):
     lock_dict[backup_dir] = asyncio.Lock()
   
   return lock_dict[backup_dir]
+
+
+def get_backup_base_dir():
+  if os.getenv("PXC_REMOVABLE_DATASTORES"):
+    # logic for selecting any of the removables and writing there
+    datastore_cmd = subprocess.run(["proxmox-backup-manager", "datastore", "list", "--output-format", "json"], stdout=subprocess.PIPE, text=True)
+    datastores = json.loads(datastore_cmd.stdout)
+
+    target_datastores = os.getenv("PXC_REMOVABLE_DATASTORES").split(",")
+
+    # find the first datastore that matches env var
+    matching_datastore = None
+    for datastore in datastores:
+      if datastore["name"] in target_datastores:
+        matching_datastore = datastore
+        break
+    
+    if not matching_datastore:
+      raise Exception("Could not find matching datastore!")
+
+    return f"/mnt/datastore/{matching_datastore['name']}/pxc"
+  elif os.getenv("PXC_BACKUP_BASE_DIR"):
+    return os.getenv("PXC_BACKUP_BASE_DIR")
+  else:
+    raise Exception("No env variables configured for any backup scenario!")
+  
+
+def init_backup_dir(backup_dir):
+  backup_base_dir = get_backup_base_dir()
+
+  full_backup_dir = f"{backup_base_dir}/borg-{backup_dir}"
+
+  Path(full_backup_dir).mkdir(parents=True, exist_ok=True)
+
+  # init borg repo, is ok to fail if it already exists
+  subprocess.run(["borg", "init", "--encryption=none", full_backup_dir])
+
+  return full_backup_dir
+  
+
+def copy_backup_generic():
+  backup_base_dir = get_backup_base_dir()
+
+  source_dir = '/opt/bdd'
+  for file in os.listdir(source_dir):
+    if not file.startswith("."):
+      full_source_path = os.path.join(source_dir, file)
+      full_dest_path = os.path.join(backup_base_dir, file)
+
+      if os.path.isfile(full_source_path):
+        shutil.copy2(full_source_path, full_dest_path)
+
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -70,15 +114,13 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
           raise Exception("Unknown backup type " + borg_archive_type)
   
         if borg_archive_type == "k8s":
-          backup_dir = "k8s/" + req_dict["namespace"]
+          backup_dir = init_backup_dir("k8s/" + req_dict["namespace"])
         else:
-          backup_dir = borg_archive_type
+          backup_dir = init_backup_dir(borg_archive_type)
 
-        init_backup_dir(backup_dir)
-        
         # lock locally, we have one borg archive per archive type
         async with get_lock(backup_dir):
-          borg_archive = f"{BACKUP_BASE_DIR}/borg-{backup_dir}::{archive_name}_{timestamp}"
+          borg_archive = f"{backup_dir}::{archive_name}_{timestamp}"
           logger.info(f"accuired lock {backup_dir}")
 
           # send continue signal, meaning we have the lock and export can start.
@@ -126,17 +168,19 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         # read meta dict size
         dict_size = struct.unpack('!I', (await reader.readexactly(4)))[0]
         meta_dict = pickle.loads((await reader.readexactly(dict_size)))
+        db_path = f"{get_backup_base_dir()}/stack-meta-db.json"
 
-        async with get_lock("stack"):
-          meta_db = TinyDB(STACK_META_DB_PATH)
+        async with get_lock(db_path):
+          meta_db = TinyDB(db_path)
           meta_db.insert(meta_dict)
 
       case Command.IMAGE_META:
         dict_size = struct.unpack('!I', (await reader.readexactly(4)))[0]
         meta_dict = pickle.loads((await reader.readexactly(dict_size)))
+        db_path = f"{get_backup_base_dir()}/image-meta-db.json"
 
-        async with get_lock("image"):
-          meta_db = TinyDB(IMAGE_META_DB_PATH)
+        async with get_lock(db_path):
+          meta_db = TinyDB(db_path)
           meta_db.insert(meta_dict)
 
   except asyncio.IncompleteReadError as e:
@@ -157,6 +201,11 @@ async def run():
 def main():
   if ENV == 'PRODUCTION':
     copy_backup_generic()
+
+  backup_store_env_vars = ["PXC_BACKUP_BASE_DIR", "PXC_REMOVABLE_DATASTORES"]
+  num_defined = len([var for var in backup_store_env_vars if os.getenv(var)])
+  if num_defined != 1:
+    raise Exception(f"Number of defined backup store vars is {num_defined} but should only be exactly 1 defined!")
 
   asyncio.run(run())
 

@@ -2,12 +2,10 @@ import logging
 import subprocess
 import time
 import os
-import shutil
+
 from tinydb import TinyDB, Query
 import json
-import paramiko
 import base64
-import re
 import pickle
 import base64
 import uuid
@@ -24,11 +22,6 @@ os.environ["BORG_RELOCATED_REPO_ACCESS_IS_OK"] = "yes"
 
 ENV = os.getenv("ENV", "TESTING")
 
-# constants
-BACKUP_BASE_DIR = os.getenv("BACKUP_BASE_DIR", "/tmp/pve-cloud-test-backup")
-
-IMAGE_META_DB_PATH = f"{BACKUP_BASE_DIR}/image-meta-db.json"
-STACK_META_DB_PATH = f"{BACKUP_BASE_DIR}/stack-meta-db.json"
 
 def group_image_metas(metas, type_keys, group_key, stack_filter=None):
   metas_grouped = {}
@@ -99,7 +92,7 @@ def restore_pvcs(metas_grouped, namespace_secret_dict, args, api_client):
   filter_namespaces = [] if args.namespaces == "" else args.namespaces.split(",")
 
   for orig_namespace, metas_group in metas_grouped.items():
-    if filter_namespaces and namespace not in filter_namespaces:
+    if filter_namespaces and orig_namespace not in filter_namespaces:
       continue # skip filtered out namespaces
 
     restore_namespace = orig_namespace
@@ -404,12 +397,3 @@ def get_image_metas(args, timestamp_filter = None):
   return timestamp_archives
 
 
-def copy_backup_generic():
-  source_dir = '/opt/bdd'
-  for file in os.listdir(source_dir):
-    if not file.startswith("."):
-      full_source_path = os.path.join(source_dir, file)
-      full_dest_path = os.path.join(BACKUP_BASE_DIR, file)
-
-      if os.path.isfile(full_source_path):
-        shutil.copy2(full_source_path, full_dest_path)

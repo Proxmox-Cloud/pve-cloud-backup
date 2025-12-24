@@ -79,6 +79,8 @@ def init_backup_dir(backup_dir):
 def copy_backup_generic():
   backup_base_dir = get_backup_base_dir()
 
+  Path(backup_base_dir).mkdir(parents=True, exist_ok=True)
+
   source_dir = '/opt/bdd'
   for file in os.listdir(source_dir):
     if not file.startswith("."):

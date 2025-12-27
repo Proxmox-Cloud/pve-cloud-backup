@@ -291,7 +291,7 @@ async def send_backups(raw_k8s_meta, timestamp, backup_addr):
 
       send_commands.append({"params": params, "backup_addr": backup_addr, "subprocess_args": ["rbd", "export", f"{pool}/temp-clone-{timestamp}-{image}", "-"]})
 
-  semaphore = asyncio.Semaphore(int(os.getenv("SEND_PARALELLISM_NUM", "4")))
+  semaphore = asyncio.Semaphore(int(os.getenv("SEND_PARALELLISM_NUM", "2")))
 
   # start one thread per type, since borg on bdd side is single threaded per archive
   export_tasks = [asyncio.create_task(send_export(command, semaphore)) for command in send_commands]

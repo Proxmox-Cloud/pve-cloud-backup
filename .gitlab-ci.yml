@@ -81,3 +81,17 @@ py_pve_cloud_upstream:
     - /scripts/upstream-push.sh "Update py-pve-cloud version to $PY_PVE_CLOUD (pessimistic)"
   rules:
     - if: ( $PY_PVE_CLOUD != null || $PY_PVE_CLOUD =~ /^./ ) # set by upstream
+
+
+# call the pipeline for the release patch tag we just created above - not included in default pipelines
+trigger_upstream_release_tag:
+  stage: deploy
+  image: alpine/curl:8.14.1
+  script:
+    - |
+      curl --request POST \
+        --form "token=${CI_JOB_TOKEN}" \
+        --form "ref=${UPSTREAM_TAG_MESSAGE}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/trigger/pipeline"
+  rules:
+    - if: $UPSTREAM_TAG_MESSAGE =~ /-all-/ && ( $PY_PVE_CLOUD != null || $PY_PVE_CLOUD =~ /^./ ) # set by upstream

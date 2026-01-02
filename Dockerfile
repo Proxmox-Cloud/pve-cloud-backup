@@ -1,12 +1,7 @@
-# FROM quay.io/ceph/ceph:v19.2.1
 FROM debian:bookworm
 
 # empty by default, using official pypi
 ARG LOCAL_PYPI_IP
-
-# # encoding map missing from the quay image, we need this for certain pip packages
-# COPY cp437.py /usr/lib64/python3.9/encodings/
-# COPY cp1252.py /usr/lib64/python3.9/encodings/
 
 # install essentials
 RUN apt update && apt install python3 python3-pip python3-venv wget ssh -y
@@ -22,8 +17,6 @@ RUN echo -e "Host *\n  StrictHostKeyChecking no" > /root/.ssh/config && \
     chmod 600 /root/.ssh/config
 
 WORKDIR /app
-
-# RUN yum install python3-pip git -y
 
 # install requirements in seperate layer
 COPY requirements.txt ./

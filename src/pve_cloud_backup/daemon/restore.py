@@ -1,14 +1,16 @@
-import logging
-import subprocess
-import time
-import os
-from tinydb import TinyDB, Query
+from kubernetes import client, config
+import base64
 import json
-import base64
+import os
+import subprocess
+import asyncio
+import struct
+from pve_cloud_backup.daemon.rpc import Command
 import pickle
-import base64
+import logging
+import time
+from tinydb import TinyDB, Query
 import uuid
-from kubernetes import client
 from kubernetes.client.rest import ApiException
 from pprint import pformat
 import fnmatch
@@ -16,74 +18,14 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+import zstandard as zstd
 
 
-logger = logging.getLogger("bdd")
+log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_str, logging.INFO)
 
-os.environ["BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK"] = "yes" # we need this to stop borg cli from manual prompting
-os.environ["BORG_RELOCATED_REPO_ACCESS_IS_OK"] = "yes"
-
-ENV = os.getenv("ENV", "TESTING")
-
-def get_backup_base_dir():
-  if os.getenv("PXC_REMOVABLE_DATASTORES"):
-    # logic for selecting any of the removables and writing there
-    datastore_cmd = subprocess.run(["proxmox-backup-manager", "datastore", "list", "--output-format", "json"], stdout=subprocess.PIPE, text=True)
-    datastores = json.loads(datastore_cmd.stdout)
-
-    target_datastores = os.getenv("PXC_REMOVABLE_DATASTORES").split(",")
-
-    # find the first datastore that matches env var
-    matching_online_datastore = None
-    for datastore in datastores:
-      if datastore["name"] in target_datastores:
-        result = subprocess.run(
-            ["findmnt", f"/mnt/datastore/{datastore['name']}"],
-            stdout=subprocess.PIPE,
-            text=True
-        )
-
-        # check if its mounted
-        if result.stdout.strip():
-          matching_online_datastore = datastore
-          break
-    
-    if not matching_online_datastore:
-      raise Exception("Could not find matching datastore!")
-
-    return f"/mnt/datastore/{matching_online_datastore['name']}/pxc"
-  elif os.getenv("PXC_BACKUP_BASE_DIR"):
-    return os.getenv("PXC_BACKUP_BASE_DIR")
-  else:
-    raise Exception("No env variables configured for any backup scenario!")
-  
-
-def init_backup_dir(backup_dir):
-  backup_base_dir = get_backup_base_dir()
-
-  full_backup_dir = f"{backup_base_dir}/borg-{backup_dir}"
-
-  Path(full_backup_dir).mkdir(parents=True, exist_ok=True)
-
-  # init borg repo, is ok to fail if it already exists
-  subprocess.run(["borg", "init", "--encryption=none", full_backup_dir])
-
-  return full_backup_dir
-  
-
-def copy_backup_generic():
-  backup_base_dir = get_backup_base_dir()
-
-  Path(backup_base_dir).mkdir(parents=True, exist_ok=True)
-
-  source_dir = '/opt/bdd'
-  for file in os.listdir(source_dir):
-    if not file.startswith("."):
-      full_source_path = os.path.join(source_dir, file)
-      full_dest_path = os.path.join(backup_base_dir, file)
-
-      if os.path.isfile(full_source_path):
-        shutil.copy2(full_source_path, full_dest_path)
+logging.basicConfig(level=log_level)
+logger = logging.getLogger("pxc-restore")
 
 
 def group_image_metas(metas, type_keys, group_key, stack_filter=None):
@@ -107,12 +49,10 @@ def group_image_metas(metas, type_keys, group_key, stack_filter=None):
 
   return metas_grouped
 
-
 # these functions are necessary to convert python k8s naming to camel case
 def to_camel_case(snake_str):
     components = snake_str.split('_')
     return components[0] + ''.join(x.title() for x in components[1:])
-
 
 # this one too
 def convert_keys_to_camel_case(obj):
@@ -128,10 +68,44 @@ def convert_keys_to_camel_case(obj):
         return obj
 
 
-def restore_pvcs(metas_grouped, namespace_secret_dict, args, api_client):
-  core_v1 = client.CoreV1Api(api_client=api_client)
-  apps_v1 = client.AppsV1Api(api_client=api_client)
-  storage_v1 = client.StorageV1Api(api_client=api_client)
+async def procedure():
+  restore_args = json.loads(base64.b64decode(os.getenv("PXC_RESTORE_ARGS")))
+  logger.info(restore_args)
+
+  # connect to the backup server and start the restore procedure
+  reader, writer = await asyncio.open_connection(restore_args["bdd_host"], 8085)
+  writer.write(struct.pack("B", Command.RESTORE_PROCEDURE.value))
+  await writer.drain()
+
+  # first we send the timestamp and receive our meta information for the restore
+  writer.write((restore_args["timestamp"] + "\n").encode())
+  await writer.drain()
+
+  # read the archives
+  dict_size = struct.unpack('!I', (await reader.readexactly(4)))[0]
+  metas = pickle.loads((await reader.readexactly(dict_size)))
+  logger.info(metas)
+
+  metas_grouped = group_image_metas(metas, ["k8s"], "namespace", restore_args["stack_name"] + "." + restore_args["cloud_domain"])
+  logger.info(metas_grouped)
+
+  # query the server for backup secrets
+  writer.write((restore_args["stack_name"] + "." + restore_args["cloud_domain"] + "\n").encode())
+  await writer.drain()
+
+  # read the the meta information
+  dict_size = struct.unpack('!I', (await reader.readexactly(4)))[0]
+  stack_meta = pickle.loads((await reader.readexactly(dict_size)))
+  logger.info(stack_meta)
+  
+  namespace_secret_dict = pickle.loads(base64.b64decode(stack_meta["namespace_secret_dict_b64"]))
+  logger.info(namespace_secret_dict)
+
+  # now we start the restore procedure
+  config.load_incluster_config()
+  core_v1 = client.CoreV1Api()
+  apps_v1 = client.AppsV1Api()
+  storage_v1 = client.StorageV1Api()
 
   # get ceph storage classes
   ceph_storage_classes = {sc.metadata.name: sc for sc in storage_v1.list_storage_class().items if sc.provisioner == 'rbd.csi.ceph.com'}
@@ -152,15 +126,17 @@ def restore_pvcs(metas_grouped, namespace_secret_dict, args, api_client):
 
   ceph_cluster_id = json.loads(ceph_csi_config.data.get("config.json"))[0]["clusterID"]
 
-  filter_namespaces = [] if args.namespaces == "" else args.namespaces.split(",")
+  filter_namespaces = [] if restore_args["namespaces"] == "" else restore_args["namespaces"].split(",")
 
+  logger.info("restoring namespaces")
   for orig_namespace, metas_group in metas_grouped.items():
     if filter_namespaces and orig_namespace not in filter_namespaces:
       continue # skip filtered out namespaces
 
+    logger.info(f"restoring {orig_namespace}")
     restore_namespace = orig_namespace
 
-    for namespace_mapping in args.namespace_mapping:
+    for namespace_mapping in restore_args["namespace_mapping"]:
       if namespace_mapping.startswith(orig_namespace):
         restore_namespace = namespace_mapping.split(":")[1]
         logger.info(f"namespace mapping matched {namespace_mapping}")
@@ -168,7 +144,7 @@ def restore_pvcs(metas_grouped, namespace_secret_dict, args, api_client):
     logger.info(f"trying to restore volumes of {orig_namespace} into {restore_namespace}")
 
     auto_scale_replicas = {}
-    if args.auto_scale:
+    if restore_args["auto_scale"]:
       # auto downscale deployments and statefulsets of namespace
       deployments = apps_v1.list_namespaced_deployment(restore_namespace)
       for d in deployments.items:
@@ -219,11 +195,11 @@ def restore_pvcs(metas_grouped, namespace_secret_dict, args, api_client):
       raise Exception(f"found pods in {restore_namespace} - {pod_phases} - scale down all and force delete!")
 
     # process secret overwrites
-    if args.secret_pattern:
+    if restore_args["secret_pattern"]:
       
       namespace_secrets = {secret["metadata"]["name"]: secret for secret in namespace_secret_dict[orig_namespace]}
 
-      for secret_pattern in args.secret_pattern:
+      for secret_pattern in restore_args["secret_pattern"]:
         if secret_pattern.split("/")[0] == restore_namespace:
           # arg that is meant for this namespace restore
           pattern = secret_pattern.split("/")[1]
@@ -244,7 +220,7 @@ def restore_pvcs(metas_grouped, namespace_secret_dict, args, api_client):
                 else:
                     raise
 
-    if args.auto_delete:
+    if restore_args["auto_delete"]:
       pvcs = core_v1.list_namespaced_persistent_volume_claim(restore_namespace)
       for pvc in pvcs.items:
         name = pvc.metadata.name
@@ -280,20 +256,14 @@ def restore_pvcs(metas_grouped, namespace_secret_dict, args, api_client):
       pv_dict = pickle.loads(base64.b64decode(meta["pv_dict_b64"]))
       logger.debug(f"pv_dict:\n{pv_dict}")
 
-      # extract from borg archive
-      if args.backup_path:
-        # we can use the absolute path provided
-        full_borg_archive = f"{args.backup_path}borg-{type}/{orig_namespace}::{image_name}_{args.timestamp}"
-      else:
-        full_borg_archive = f"{os.getcwd()}/borg-{type}/{orig_namespace}::{image_name}_{args.timestamp}"
       
       # import the image into ceph
       # move to new pool if mapping is defined
       pool = meta["pool"]
       storage_class = pvc_dict["spec"]["storage_class_name"]
 
-      if args.pool_sc_mapping:
-        for pool_mapping in args.pool_sc_mapping:
+      if restore_args["pool_sc_mapping"]:
+        for pool_mapping in restore_args["pool_sc_mapping"]:
           old_pool = pool_mapping.split(":")[0]
           new_pool_sc = pool_mapping.split(":")[1]
           if pool == old_pool:
@@ -304,10 +274,51 @@ def restore_pvcs(metas_grouped, namespace_secret_dict, args, api_client):
 
       new_csi_image_name = f"csi-vol-{uuid.uuid4()}"
 
-      logger.info(f"extracting borg archive {full_borg_archive} into rbd import {pool}/{new_csi_image_name}")
+      # send to the bdd server what we want to request
+      request_archive = f"borg-{type}/{orig_namespace}\n"
+      request_artifact = f"{image_name}_{restore_args['timestamp']}\n"
 
-      with subprocess.Popen(["borg", "extract", "--sparse", "--stdout", full_borg_archive], stdout=subprocess.PIPE) as proc:
-        subprocess.run(["rbd", "import", "-", f"{pool}/{new_csi_image_name}"], check=True, stdin=proc.stdout)
+      logger.info(f"requesting borg archive stream from bdd {request_archive} - {request_artifact} into rbd import {pool}/{new_csi_image_name}")
+
+      # bdd server does readline()
+      writer.write(request_archive.encode())
+      await writer.drain()
+
+      writer.write(request_artifact.encode())
+      await writer.drain()
+
+      # pipe the resulting stream into rbd import
+      rbd_import_proc = await asyncio.create_subprocess_exec(
+        "rbd", "import", "-", f"{pool}/{new_csi_image_name}",
+        stdin=asyncio.subprocess.PIPE
+      )
+
+      # read compressed chunks
+      decompressor = zstd.ZstdDecompressor().decompressobj()
+      while True:
+        # client first always sends chunk size
+        chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+        if chunk_size == 0:
+          break # client sends 0 chunk size at the end to signal that its finished uploading
+        chunk = await reader.readexactly(chunk_size)
+        
+        # decompress and write
+        decompressed_chunk = decompressor.decompress(chunk)
+        if decompressed_chunk:
+          rbd_import_proc.stdin.write(decompressed_chunk)
+          await rbd_import_proc.stdin.drain()
+
+      # the decompressor does not always return a decompressed chunk but might retain 
+      # and return empty. at the end we need to call flush to get everything out
+      rbd_import_proc.stdin.write(decompressor.flush())
+      await rbd_import_proc.stdin.drain()
+
+      # close the proc stdin pipe, writer gets closed in finally
+      rbd_import_proc.stdin.close()
+      exit_code = await rbd_import_proc.wait()
+
+      if exit_code != 0:
+        raise Exception(f"Rbd import failed with code {exit_code}")
 
       # restore from pickled pvc dicts
       new_pv_name = f"pvc-{uuid.uuid4()}"
@@ -393,8 +404,16 @@ def restore_pvcs(metas_grouped, namespace_secret_dict, args, api_client):
       logger.debug(f"creating new pv:\n{pformat(pv_dict)}")
       core_v1.create_persistent_volume(body=client.V1PersistentVolume(**convert_keys_to_camel_case(pv_dict)))
 
+    # send the done signal to bdd server
+    writer.write("##BRCTL-DONE\n".encode())
+    await writer.drain()
+
+    # close the writer here
+    writer.close()
+    await writer.wait_closed()
+
     # scale back up again
-    if args.auto_scale:
+    if restore_args["auto_scale"]:
       # auto downscale deployments and statefulsets of namespace
       deployments = apps_v1.list_namespaced_deployment(restore_namespace)
       for d in deployments.items:
@@ -419,44 +438,8 @@ def restore_pvcs(metas_grouped, namespace_secret_dict, args, api_client):
     logger.info(f"restore of namespace {orig_namespace} into {restore_namespace} complete, you can now scale up your deployments again")
     
 
-def get_image_metas(args, timestamp_filter = None):
-  image_meta_db = TinyDB(f"{args.backup_path}image-meta-db.json")
 
-  archives = []
-
-  # iterate all k8s namespaced borg repos
-  k8s_base_path = f"{args.backup_path}/borg-k8s"
-  namespace_repos = [name for name in os.listdir(k8s_base_path) if os.path.isdir(os.path.join(k8s_base_path, name))]
-
-  for repo in namespace_repos:
-    list_result = subprocess.run(["borg", "list", f"{args.backup_path}/borg-k8s/{repo}", "--json"], capture_output=True)
-
-    if list_result.returncode != 0:
-      raise Exception(f"Borg list failed for repo {repo}: {list_result.stderr.decode()}")
-
-    archives.extend(json.loads(list_result.stdout)["archives"])
-
-  timestamp_archives = {}
-  for archive in archives:
-    image = archive["archive"].split("_", 1)[0]
-    timestamp = archive["archive"].split("_", 1)[1]
-
-    if timestamp_filter is not None and timestamp_filter != timestamp:
-      continue # skip filtered
-
-    if timestamp not in timestamp_archives:
-      timestamp_archives[timestamp] = []  
-
-    Meta = Query()
-    image_meta = image_meta_db.get((Meta.image_name == image) & (Meta.timestamp == timestamp))
-
-    if image_meta is None:
-      logger.error(f"None meta found {timestamp}, image_name {image}, archive {archive}")
-      del timestamp_archives[timestamp]
-      continue
-
-    timestamp_archives[timestamp].append(image_meta)
-
-  return timestamp_archives
-
+def main():
+  logger.info("running pxc restore job")
+  asyncio.run(procedure())
 

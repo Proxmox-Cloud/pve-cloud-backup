@@ -20,6 +20,10 @@ build_commands = [
   ]
 ]
 dyn_version_py_path = "src/pve_cloud_backup/_version.py"
+sub_rebuild_keys = [ "version.py-pve-cloud" ]
 
 [redis]
 version_key = "version.pve-cloud-backup"
+
+[local]
+dyn_version_py_path = "src/pve_cloud_backup/_version.py"

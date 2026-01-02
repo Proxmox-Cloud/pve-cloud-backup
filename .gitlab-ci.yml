@@ -69,3 +69,15 @@ downstream_tf_backup_module:
     UPSTREAM_TAG_MESSAGE: $CI_COMMIT_TAG_MESSAGE # here we store the type of the release
   rules:
     - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+$/' # semver
+
+
+py_pve_cloud_upstream:
+  stage: build
+  image: docker.io/tobiashvmz/pve-cloud-ci:2025122115
+  script:
+    # write the new version
+    - PESSIMISTIC_CONSTRAINT=$(/scripts/get-pessimistic-semver.sh $PY_PVE_CLOUD)
+    - sed -i "s/^py-pve-cloud>=.*$/py-pve-cloud>=${PY_PVE_CLOUD},<${PESSIMISTIC_CONSTRAINT}/" requirements.txt
+    - /scripts/upstream-push.sh "Update py-pve-cloud version to $PY_PVE_CLOUD (pessimistic)"
+  rules:
+    - if: ( $PY_PVE_CLOUD != null || $PY_PVE_CLOUD =~ /^./ ) # set by upstream

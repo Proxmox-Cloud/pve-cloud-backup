@@ -1,12 +1,13 @@
-from tinydb import TinyDB
-from pve_cloud_backup.daemon.shared import get_backup_base_dir, init_backup_dir, copy_backup_generic
+from tinydb import TinyDB, Query
+from pve_cloud_backup.daemon.funcs import get_backup_base_dir, init_backup_dir, copy_backup_generic, get_image_metas
 import logging
 import os
-from enum import Enum
+from pve_cloud_backup.daemon.rpc import Command
 import asyncio
 import struct
 import pickle
 import zstandard as zstd
+from pve_cloud_backup.fetcher.net import send_cchunk
 
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -18,12 +19,6 @@ logger = logging.getLogger("bdd")
 ENV = os.getenv("ENV", "TESTING")
 
 BACKUP_TYPES = ["k8s", "nextcloud", "git", "postgres"]
-
-class Command(Enum):
-  ARCHIVE = 1
-  IMAGE_META = 2
-  STACK_META = 3
-
 
 lock_dict = {}
 
@@ -113,6 +108,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         # read meta dict size
         dict_size = struct.unpack('!I', (await reader.readexactly(4)))[0]
         meta_dict = pickle.loads((await reader.readexactly(dict_size)))
+        logger.info(meta_dict)
+        
         db_path = f"{get_backup_base_dir()}/stack-meta-db.json"
 
         async with get_lock(db_path):
@@ -128,6 +125,142 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
           meta_db = TinyDB(db_path)
           meta_db.insert(meta_dict)
 
+      # funcs called by brctl for restores
+      case Command.LIST_BACKUPS:
+        db_path = f"{get_backup_base_dir()}/image-meta-db.json"
+
+        async with get_lock(db_path):
+          # we call borg on all our backups and send a return string that is strictly for display via the cli tool
+          timestamp_archives = get_image_metas()
+
+        # simply return all archives
+        archives_pickled = pickle.dumps(timestamp_archives)
+        writer.write(struct.pack("!I", len(archives_pickled)))
+        await writer.drain()
+
+        writer.write(archives_pickled)
+        await writer.drain()
+        logger.debug("send archives")
+      
+      case Command.LIST_BACKUP_DETAILS:
+        timestamp = (await reader.readline()).decode().rstrip("\n")
+
+        db_path = f"{get_backup_base_dir()}/image-meta-db.json"
+
+        async with get_lock(db_path):
+          # we call borg on all our backups and send a return string that is strictly for display via the cli tool
+          # this time we need the filter for displaying details of a certain backup
+          timestamp_archives = get_image_metas(timestamp_filter=timestamp) 
+
+        # return the archive
+        archive_pickled = pickle.dumps(timestamp_archives[timestamp])
+        writer.write(struct.pack("!I", len(archive_pickled)))
+        await writer.drain()
+
+        writer.write(archive_pickled)
+        await writer.drain()
+
+        # return k8s secret requests
+        db_path = f"{get_backup_base_dir()}/stack-meta-db.json"
+
+        async with get_lock(db_path):
+          meta_db = TinyDB(db_path)
+
+        while True:
+          # listen for secret requests
+          stack = (await reader.readline()).decode().rstrip("\n")
+
+          if stack == "##BRCTL-DONE":
+            break # done signal
+
+          Meta = Query()
+          stack_meta = meta_db.get((Meta.timestamp == timestamp) & (Meta.stack == stack) & (Meta.type == "k8s"))
+
+          meta_pickled = pickle.dumps(stack_meta)
+          writer.write(struct.pack("!I", len(meta_pickled)))
+          await writer.drain()
+
+          writer.write(meta_pickled)
+          await writer.drain()
+
+      case Command.RESTORE_PROCEDURE:
+        timestamp = (await reader.readline()).decode().rstrip("\n")
+        logger.info(timestamp)
+
+        db_path = f"{get_backup_base_dir()}/image-meta-db.json"
+
+        async with get_lock(db_path):
+          # we call borg on all our backups and send a return string that is strictly for display via the cli tool
+          # this time we need the filter for displaying details of a certain backup
+          timestamp_archives = get_image_metas(timestamp_filter=timestamp) 
+
+        # return the archive
+        archive_pickled = pickle.dumps(timestamp_archives[timestamp])
+        writer.write(struct.pack("!I", len(archive_pickled)))
+        await writer.drain()
+
+        writer.write(archive_pickled)
+        await writer.drain()
+
+        # client then queries secrets of the backup to restore
+        # return k8s secret requests
+        db_path = f"{get_backup_base_dir()}/stack-meta-db.json"
+
+        async with get_lock(db_path):
+          meta_db = TinyDB(db_path)
+
+          # listen for secret requests
+          stack = (await reader.readline()).decode().rstrip("\n")
+          logger.info(stack)
+
+          Meta = Query()
+          stack_meta = meta_db.get((Meta.timestamp == timestamp) & (Meta.stack == stack) & (Meta.type == "k8s"))
+          logger.info(stack_meta)
+
+          meta_pickled = pickle.dumps(stack_meta)
+          writer.write(struct.pack("!I", len(meta_pickled)))
+          await writer.drain()
+
+          writer.write(meta_pickled)
+          await writer.drain()
+
+        # next the client requests the archives which we extract here and pipe via a stream
+        while True:
+          # open the extract process and send the stream the output
+          request_archive = (await reader.readline()).decode().rstrip("\n")
+          logger.info(request_archive)
+
+          if request_archive == "##BRCTL-DONE":
+            break # done signal
+
+          request_artifact = (await reader.readline()).decode().rstrip("\n")
+          logger.info(request_artifact)
+
+          backup_dir = f"{get_backup_base_dir()}/{request_archive}"
+          
+          async with get_lock(backup_dir):
+            proc = await asyncio.create_subprocess_exec(
+              "borg", "extract", "--sparse", "--stdout", f"{backup_dir}::{request_artifact}",
+              stdout=asyncio.subprocess.PIPE
+            )
+            
+            compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
+            while True:
+              chunk = await proc.stdout.read(4 * 1024 * 1024 * 10)  # 4MB
+              if not chunk:
+                  break
+              
+              # compress and send the chunk
+              await send_cchunk(writer, compressor.compress(chunk))
+
+            # send the rest in the compressor
+            await send_cchunk(writer, compressor.flush())
+
+            logger.info("sending eof")
+            writer.write(struct.pack("!I", 0))
+            await writer.drain()
+
+
   except asyncio.IncompleteReadError as e:
     logger.error("Client disconnected", e)
   finally:
@@ -136,7 +269,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def run():
-  server = await asyncio.start_server(handle_client, "0.0.0.0", 8888)
+  server = await asyncio.start_server(handle_client, "0.0.0.0", 8085)
   addr = server.sockets[0].getsockname()
   logger.info(f"Serving on {addr}")
   async with server:

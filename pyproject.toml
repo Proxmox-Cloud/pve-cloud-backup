@@ -17,4 +17,4 @@ version = {attr = "pve_cloud_backup._version.__version__"}
 daemon = "pve_cloud_backup.daemon.bdd:main"
 brctl = "pve_cloud_backup.daemon.brctl:main"
 fetcher = "pve_cloud_backup.fetcher.main:main"
-
+pxc-restore = "pve_cloud_backup.daemon.restore:main"

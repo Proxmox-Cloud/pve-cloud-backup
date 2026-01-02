@@ -2,16 +2,19 @@ import argparse
 import logging
 from kubernetes import client
 from kubernetes.config.kube_config import KubeConfigLoader
-import pve_cloud_backup.daemon.shared as shared
-from proxmoxer import ProxmoxAPI
-from tinydb import TinyDB, Query
-from pprint import pformat
 import yaml
 import pickle
 import base64
 import os
 import json
-
+import asyncio
+from pve_cloud_backup.daemon.rpc import Command
+import struct
+from pve_cloud.lib.inventory import get_online_pve_host
+from pve_cloud.cli.pvclu import get_cluster_vars, get_ssh_master_kubeconfig, get_cloud_domain
+from kubernetes import client
+from kubernetes.client import V1Job, V1JobSpec, V1ObjectMeta, V1PodTemplateSpec, V1PodSpec, V1Container, V1EnvVar, V1VolumeMount, V1Volume, V1ConfigMapVolumeSource, V1SecretVolumeSource
+from pve_cloud_backup._version import __version__ as bkp_version
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -20,11 +23,18 @@ logging.basicConfig(level=log_level)
 logger = logging.getLogger("brctl")
 
 
-def list_backup_details(args):  
-  print(f"listing details for {args.timestamp}")
-  timestamp_archives = shared.get_image_metas(args, args.timestamp)
+async def list_backup_details_remote(args):
+  reader, writer = await asyncio.open_connection(args.bdd_host, 8085)
+  writer.write(struct.pack("B", Command.LIST_BACKUP_DETAILS.value))
+  await writer.drain()
 
-  metas = timestamp_archives[args.timestamp]
+  # send the timestamp string
+  writer.write((args.timestamp + "\n").encode())
+  await writer.drain()
+
+  # read the archives
+  dict_size = struct.unpack('!I', (await reader.readexactly(4)))[0]
+  metas = pickle.loads((await reader.readexactly(dict_size)))
 
   # first we group metas
   k8s_stacks = {}
@@ -42,11 +52,13 @@ def list_backup_details(args):
   for k8s_stack, k8s_metas in k8s_stacks.items():
     print(f"  - k8s stack {k8s_stack}:")
 
-    # get stack meta and decode stack namespace secrets
-    stack_meta_db = TinyDB(f"{args.backup_path}stack-meta-db.json")
-    Meta = Query()
+    # query the server for backup secrets
+    writer.write((k8s_stack + "\n").encode())
+    await writer.drain()
 
-    stack_meta = stack_meta_db.get((Meta.timestamp == args.timestamp) & (Meta.stack == k8s_stack) & (Meta.type == "k8s"))
+    # read the the meta information
+    dict_size = struct.unpack('!I', (await reader.readexactly(4)))[0]
+    stack_meta = pickle.loads((await reader.readexactly(dict_size)))
     
     namespace_secret_dict = pickle.loads(base64.b64decode(stack_meta["namespace_secret_dict_b64"]))
 
@@ -72,108 +84,152 @@ def list_backup_details(args):
       for secret in namespace_secret_dict[namespace]:
         secret_name = secret["metadata"]["name"]
         print(f"        - {secret_name}")
+  
+  # send a terminator
+  writer.write("##BRCTL-DONE\n".encode())
+  await writer.drain()
 
 
-def list_backups(args):
-  timestamp_archives = shared.get_image_metas(args)
+async def list_backups_remote(args):
+  reader, writer = await asyncio.open_connection(args.bdd_host, 8085)
+  writer.write(struct.pack("B", Command.LIST_BACKUPS.value))
+  await writer.drain()
+
+  # read the response archives size and then the archives
+  dict_size = struct.unpack('!I', (await reader.readexactly(4)))[0]
+  archives = pickle.loads((await reader.readexactly(dict_size)))
 
   if args.json:
-    print(json.dumps(sorted(timestamp_archives)))
+    print(json.dumps(sorted(archives)))
     return
 
   print("available backup timestamps (ids):")
 
-  for timestamp in sorted(timestamp_archives):
+  for timestamp in sorted(archives):
     print(f"- timestamp {timestamp}")
 
-  
-# this assumes you first restored the virtual machines
-# and extracted a fitting kubeconfig passing it via --kubeconfig
-def restore_k8s(args):
-  print(f"restoring {args.timestamp}")
 
-  metas = shared.get_image_metas(args, args.timestamp)[args.timestamp]
+def launch_restore_job(args):
+  # fetch the kubeconfig of the cluster we want to launch the restore job in
+  online_pve_host = get_online_pve_host(args.target_pve)
+  cluster_vars = get_cluster_vars(online_pve_host)
+  cloud_domain = get_cloud_domain(args.target_pve)
 
-  metas_grouped = shared.group_image_metas(metas, ["k8s"], "namespace", args.k8s_stack_name)
+  kubeconfig_dict = yaml.safe_load(get_ssh_master_kubeconfig(cluster_vars, args.stack_name))
 
-  stack_meta_db = TinyDB(f"{args.backup_path}stack-meta-db.json")
-  Meta = Query()
-
-  stack_meta = stack_meta_db.get((Meta.timestamp == args.timestamp) & (Meta.stack == args.k8s_stack_name) & (Meta.type == "k8s"))
-  logger.debug(f"stack meta {stack_meta}")
-  namespace_secret_dict = pickle.loads(base64.b64decode(stack_meta["namespace_secret_dict_b64"]))
-
-  # user can manually specify it
-  if args.kubeconfig_new:
-    with open(args.kubeconfig_new, "r") as file:
-      kubeconfig_dict = yaml.safe_load(file)
-  else:
-    # restore into original k8s cluster
-    master_ipv4 = stack_meta["master_ip"]
-    kubeconfig_dict = yaml.safe_load(stack_meta["raw_kubeconfig"])
-
-    # override the connection ip as it is set to localhost on the machines
-    kubeconfig_dict["clusters"][0]["cluster"]["server"] = f"https://{master_ipv4}:6443"
-
-  logger.debug(f"kubeconfig dict {pformat(kubeconfig_dict)}")
-
-  # init kube client
+  # init kube client for launching the restore job
   loader = KubeConfigLoader(config_dict=kubeconfig_dict)
   configuration = client.Configuration()
   loader.load_and_set(configuration)
+  batch_v1 = client.BatchV1Api()
 
-  # Create a client from this configuration
-  api_client = client.ApiClient(configuration)
+  serializable_args = vars(args).copy()
+  serializable_args["func"] = args.func.__name__
 
-  # run the restore
-  shared.restore_pvcs(metas_grouped, namespace_secret_dict, args, api_client)
+  # env vars hold secrets for the job to run and auth
+  env_vars = [
+      V1EnvVar(name="PXC_RESTORE_ARGS", value=base64.b64encode(json.dumps(serializable_args | { "cloud_domain": cloud_domain }).encode()).decode()),
+  ]
 
-
-# dynamic backup path function for the --backup-path argument
-def backup_path(value):
-  if value == "":
-    return ""
+  container = V1Container(
+    name="pxc-restore",
+    image=args.image if args.image else f"tobiashvmz/pve-cloud-backup:{bkp_version}", # args.image gets injected by e2e tests
+    args=["pxc-restore"], # launch the job with our cli args as parameter
+    env=env_vars,
+    volume_mounts=[
+      V1VolumeMount(
+          name="ceph-config",
+          mount_path="/etc/ceph/ceph.conf",
+          sub_path="ceph.conf"
+      ),
+      V1VolumeMount(
+          name="ceph-secrets",
+          mount_path="/etc/pve/priv/ceph.client.admin.keyring",
+          sub_path="ceph-admin-keyring"
+      ),
+    ]
+  )
   
-  if value.endswith("/"):
-    return value
-  else:
-    return value + "/"
+  template = V1PodTemplateSpec(
+    metadata=V1ObjectMeta(labels={"job": f"pxc-restore-{args.timestamp}"}),
+    spec=V1PodSpec(
+      restart_policy="Never", 
+      containers=[container],
+      volumes= [
+        V1Volume(
+            name="ceph-config",
+            config_map=V1ConfigMapVolumeSource(
+                name="ceph-config"
+            )
+        ),
+        V1Volume(
+            name="ceph-secrets",
+            secret=V1SecretVolumeSource(
+                secret_name="ceph-secrets"
+            )
+        ),
+      ])
+  )
+
+  job_spec = V1JobSpec(
+    template=template,
+    backoff_limit=0 
+  )
+
+  job = V1Job(
+    api_version="batch/v1",
+    kind="Job",
+    metadata=V1ObjectMeta(name=f"pxc-restore-job-{args.timestamp.replace("_", "-")}"),
+    spec=job_spec
+  )
+
+  # Launch the Job in the default namespace
+  batch_v1 = client.BatchV1Api()
+  resp = batch_v1.create_namespaced_job(
+    body=job,
+    namespace="pve-cloud-backup"
+  )
+
+  logger.info("Job created. Status='%s'" % str(resp.status))
 
 
-# purpose of these tools is disaster recovery into an identical pve + ceph system
-# assumes to be run on a pve system, but can be passed pve host and path to ssh key aswell
-def main():
+def get_parser():
   parser = argparse.ArgumentParser(description="CLI for restoring backups.")
 
   base_parser = argparse.ArgumentParser(add_help=False)
-  base_parser.add_argument("--backup-path", type=backup_path, default=".", help="Path of the mounted backup drive/dir.")
-  base_parser.add_argument("--proxmox-host", type=str, help="Proxmox host, if not run directly on a pve node.")
-  base_parser.add_argument("--proxmox-private-key", type=str, help="Path to pve root private key, for connecting to remote pve.")
+  base_parser.add_argument("--bdd-host", type=str, help="The target bdd server that hosts our backups. Needed for all operations.", required=True)
 
   subparsers = parser.add_subparsers(dest="command", required=True)
 
   list_parser = subparsers.add_parser("list-backups", help="List available backups.", parents=[base_parser])
   list_parser.add_argument("--json", action="store_true", help="Outputs the available timestamps as json.")
-  list_parser.set_defaults(func=list_backups)
+  list_parser.set_defaults(func=list_backups_remote)
 
   list_detail_parser = subparsers.add_parser("backup-details", help="List details of a backup.", parents=[base_parser])
   list_detail_parser.add_argument("--timestamp", type=str, help="Timestamp of the backup to list details of.", required=True)
-  list_detail_parser.set_defaults(func=list_backup_details)
+  list_detail_parser.set_defaults(func=list_backup_details_remote)
 
   k8s_restore_parser = subparsers.add_parser("restore-k8s", help="Restore k8s csi backups. If pvcs with same name exist, test-restore will be appended to pvc name.", parents=[base_parser])
   k8s_restore_parser.add_argument("--timestamp", type=str, help="Timestamp of the backup to restore.", required=True)
-  k8s_restore_parser.add_argument("--k8s-stack-name", type=str, help="Stack name of k8s stack that will be restored into.", required=True)
-  k8s_restore_parser.add_argument("--kubeconfig-new", type=str, help="Optional kubeconfig for new cluster restores.")
+  k8s_restore_parser.add_argument("--stack-name", type=str, help="Proxmox cloud k8s stack name where restore job will be launched. Requires pve-cloud-backup namespace installed via terraform-pxc-backup.", required=True)
+  k8s_restore_parser.add_argument("--target-pve", type=str, help="Proxmox cluster where the k8s cluster we want to restore in is running.", required=True)
   k8s_restore_parser.add_argument("--namespaces", type=str, default="", help="Specific namespaces to restore, CSV, acts as a filter. Use with --pool-mapping for controlled migration of pvcs.")
   k8s_restore_parser.add_argument("--pool-sc-mapping", action="append", help="Define pool storage class mappings (old to new), for example old-pool:new-pool/new-storage-class-name.")
   k8s_restore_parser.add_argument("--namespace-mapping", action="append", help="Namespaces that should be restored into new namespace names old-namespace:new-namespace.")
   k8s_restore_parser.add_argument("--auto-scale", action="store_true", help="When passed deployments and stateful sets will automatically get scaled down and back up again for restore.")
   k8s_restore_parser.add_argument("--auto-delete", action="store_true", help="When passed existing pvcs in namespace will automatically get deleted before restoring.")
   k8s_restore_parser.add_argument("--secret-pattern", action="append", help="Define as many times as you need, for example namespace/deployment* (glob style). Will overwrite secret data of matching existing.")
-  k8s_restore_parser.set_defaults(func=restore_k8s)
+  k8s_restore_parser.add_argument("--image", type=str, help="Custom image for launching restore job (e2e test arg).")
+  k8s_restore_parser.set_defaults(func=launch_restore_job)
 
-  args = parser.parse_args()
-  args.func(args)
+  return parser
+
+
+# purpose of these tools is disaster recovery into an identical pve + ceph system
+# assumes to be run on a pve system, but can be passed pve host and path to ssh key aswell
+def main():
+  args = get_parser().parse_args()
+  asyncio.run(args.func(args)) # all funcs are async since we only communicate with bdd
 
 
 if __name__ == "__main__":

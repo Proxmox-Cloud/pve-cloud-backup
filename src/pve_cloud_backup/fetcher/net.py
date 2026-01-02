@@ -4,14 +4,9 @@ import zstandard as zstd
 import struct
 import logging
 import pickle
+from pve_cloud_backup.daemon.rpc import Command
 
 logger = logging.getLogger("fetcher")
-
-class Command(Enum):
-  ARCHIVE = 1
-  IMAGE_META = 2
-  STACK_META = 3
-
 
 async def archive_init(reader, writer, request_dict):
   # intialize archive command
@@ -49,7 +44,7 @@ async def send_cchunk(writer, compressed_chunk):
 
 async def archive_async(backup_addr, request_dict, chunk_generator):
   logger.info(request_dict)
-  reader, writer = await asyncio.open_connection(backup_addr, 8888)
+  reader, writer = await asyncio.open_connection(backup_addr, 8085)
 
   await archive_init(reader, writer, request_dict)
 
@@ -75,7 +70,7 @@ async def archive_async(backup_addr, request_dict, chunk_generator):
 
 async def archive(backup_addr, request_dict, chunk_generator):
   logger.info(request_dict)
-  reader, writer = await asyncio.open_connection(backup_addr, 8888)
+  reader, writer = await asyncio.open_connection(backup_addr, 8085)
 
   await archive_init(reader, writer, request_dict)
 
@@ -100,7 +95,7 @@ async def archive(backup_addr, request_dict, chunk_generator):
 
 
 async def meta(backup_addr, cmd, meta_dict):
-  reader, writer = await asyncio.open_connection(backup_addr, 8888)
+  reader, writer = await asyncio.open_connection(backup_addr, 8085)
   writer.write(struct.pack("B", cmd.value))
   await writer.drain()
 

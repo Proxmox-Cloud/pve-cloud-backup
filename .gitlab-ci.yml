@@ -12,8 +12,7 @@ release_image:
   stage: deploy
   retry: 1 # even with check logic for pypi package rdy on index, calls after still sometimes fail
   image:
-    name: gcr.io/kaniko-project/executor:v1.13.0-debug
-    entrypoint: [""]
+    name: quay.io/podman/stable:v5.7.1
   script:
     # exit if ci vars are not defined for building
     - |
@@ -21,12 +20,10 @@ release_image:
         echo "Docker auth ci variable not defined!"
         exit 0
       fi
-    - echo $DOCKER_AUTH_CONFIG_B64 | base64 -d > /kaniko/.docker/config.json
-    - echo "__version__ = \"$CI_COMMIT_TAG\"" > src/pve_cloud_backup/_version.py # dynamic versioning
-    - /kaniko/executor
-      --context "${CI_PROJECT_DIR}"
-      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
-      --destination "tobiashvmz/pve-cloud-backup:$CI_COMMIT_TAG"
+    - mkdir -p /root/.config/containers
+    - echo $DOCKER_AUTH_CONFIG_B64 | base64 -d > /root/.config/containers/auth.json
+    - podman build --layers --cache-from tobiashvmz/pve-cloud-backup-cache --cache-to tobiashvmz/pve-cloud-backup-cache -t tobiashvmz/pve-cloud-backup:$CI_COMMIT_TAG .
+    - podman push tobiashvmz/pve-cloud-backup:$CI_COMMIT_TAG
   rules:
     - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+$/'
 

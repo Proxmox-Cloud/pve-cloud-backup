@@ -12,9 +12,7 @@ RUN wget -qO- https://download.ceph.com/keys/release.asc \
 RUN echo "deb [signed-by=/etc/apt/trusted.gpg.d/ceph.asc] https://download.ceph.com/debian-squid bookworm main" > /etc/apt/sources.list.d/ceph.list
 RUN apt update && apt install ceph-common -y
 
-# need -e for \n to line break
-RUN echo -e "Host *\n  StrictHostKeyChecking no" > /root/.ssh/config && \
-    chmod 600 /root/.ssh/config
+COPY --chmod=600 ssh-config /root/.ssh/config
 
 WORKDIR /app
 

@@ -119,6 +119,7 @@ format_source:
     - if: >
         $CI_COMMIT_TAG !~ /^\d+\.\d+\.\d+$/ &&
         $CI_COMMIT_TAG !~ /^release-[a-z]+$/ &&
-        $CI_COMMIT_TAG !~ /^release-all-[a-z]+$/
+        $CI_COMMIT_TAG !~ /^release-all-[a-z]+$/ &&
+        $CI_PIPELINE_SOURCE == 'push'
       when: on_success
     - when: never

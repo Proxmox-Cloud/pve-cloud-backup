@@ -4,7 +4,7 @@ FROM debian:bookworm
 ARG LOCAL_PYPI_IP
 
 # install essentials
-RUN apt update && apt install python3 python3-pip python3-venv wget ssh -y
+RUN apt update && apt install python3 python3-pip python3-venv wget ssh git -y
 
 # install ceph commons (cli tools)
 RUN wget -qO- https://download.ceph.com/keys/release.asc \

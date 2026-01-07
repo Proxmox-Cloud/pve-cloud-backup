@@ -84,7 +84,7 @@ py_pve_cloud_upstream:
 # call the pipeline for the release patch tag we just created above - not included in default pipelines
 trigger_upstream_release_tag:
   stage: deploy
-  image: alpine/curl:8.14.1
+  image: alpine/curl:8.17.0
   script:
     - |
       curl --request POST \

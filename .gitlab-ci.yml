@@ -20,7 +20,7 @@ py_pve_cloud_rc_upstream:
     - /scripts/rc-branch.sh $new_tag
     # set rc version for py-pve-cloud-dependency
     - sed -i "s/^py-pve-cloud.*$/py-pve-cloud==${PY_PVE_CLOUD//-/}/" requirements.txt
-    - /scripts/upstream-push.sh "Set py-pve-cloud rc version to ${PY_PVE_CLOUD//-/}" "${new_tag}-rc"
+    - /scripts/upstream-push.sh "Set py-pve-cloud rc version to ${PY_PVE_CLOUD//-/}" "${new_tag}-rc" 
   rules:
     - if: '$PY_PVE_CLOUD != null && $PY_PVE_CLOUD != "" && $UPSTREAM_TAG_MESSAGE =~ /^rc-.*/' # set by upstream, trigger for rc release
 

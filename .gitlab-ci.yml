@@ -122,3 +122,4 @@ format_source:
         $CI_PIPELINE_SOURCE == 'push'
       when: on_success
     - when: never
+  resource_group: deploy-prod

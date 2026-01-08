@@ -1,6 +1,6 @@
 release_tag:
   stage: build
-  image: docker.io/tobiashvmz/pve-cloud-ci:2025122115
+  image: docker.io/tobiashvmz/pve-cloud-ci:202601080950
   script:
     - /scripts/release-tag.sh
   rules:
@@ -71,7 +71,7 @@ downstream_tf_backup_module:
 
 py_pve_cloud_upstream:
   stage: build
-  image: docker.io/tobiashvmz/pve-cloud-ci:2025122115
+  image: docker.io/tobiashvmz/pve-cloud-ci:202601080950
   script:
     # write the new version
     - PESSIMISTIC_CONSTRAINT=$(/scripts/get-pessimistic-semver.sh $PY_PVE_CLOUD)

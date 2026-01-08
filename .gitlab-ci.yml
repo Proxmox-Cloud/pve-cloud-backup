@@ -16,6 +16,7 @@ rc_tag:
     - if: '$CI_COMMIT_TAG =~ /^rc-[a-z]+$/'
   resource_group: deploy-prod
 
+
 release_image:
   stage: deploy
   retry: 1 # even with check logic for pypi package rdy on index, calls after still sometimes fail
@@ -109,7 +110,6 @@ format_source:
   script:
     - git config --global user.name "$GITLAB_USER_NAME"
     - git config --global user.email "$GITLAB_USER_EMAIL"
-    
     - autoflake --in-place --recursive .
     - black .
     - isort .

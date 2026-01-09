@@ -66,7 +66,7 @@ release_image:
 publish_pypi:
   stage: deploy
   image:
-    name: tobiashvmz/pve-cloud-pyci:2026010412
+    name: tobiashvmz/pve-cloud-pyci:202601090831
   script:
     # exit if ci vars are not defined for building
     - |
@@ -105,7 +105,7 @@ downstream_tf_backup_module:
 
 format_source:
   stage: build
-  image: tobiashvmz/pve-cloud-pyci:2026010412
+  image: tobiashvmz/pve-cloud-pyci:202601090831
   script:
     - git config --global user.name "$GITLAB_USER_NAME"
     - git config --global user.email "$GITLAB_USER_EMAIL"

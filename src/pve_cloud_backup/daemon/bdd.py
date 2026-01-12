@@ -119,7 +119,6 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 # read meta dict size
                 dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
                 meta_dict = pickle.loads((await reader.readexactly(dict_size)))
-                logger.info(meta_dict)
 
                 db_path = f"{get_backup_base_dir()}/stack-meta-db.json"
 
@@ -226,7 +225,6 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                     # listen for secret requests
                     stack = (await reader.readline()).decode().rstrip("\n")
-                    logger.info(stack)
 
                     Meta = Query()
                     stack_meta = meta_db.get(
@@ -234,7 +232,6 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         & (Meta.stack == stack)
                         & (Meta.type == "k8s")
                     )
-                    logger.info(stack_meta)
 
                     meta_pickled = pickle.dumps(stack_meta)
                     writer.write(struct.pack("!I", len(meta_pickled)))

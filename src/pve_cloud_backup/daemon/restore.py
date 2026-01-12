@@ -30,8 +30,6 @@ def group_image_metas(metas, type_keys, group_key, stack_filter=None):
 
     # group metas by vmid
     for meta in metas:
-        logger.debug(f"meta {meta}")
-
         # kind of redundant right now since we only process k8s
         if not meta["type"] in type_keys:
             continue  # skip non fitting
@@ -83,7 +81,6 @@ async def procedure():
     # read the archives
     dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
     metas = pickle.loads((await reader.readexactly(dict_size)))
-    logger.info(metas)
 
     metas_grouped = group_image_metas(
         metas,
@@ -91,7 +88,6 @@ async def procedure():
         "namespace",
         restore_args["stack_name"] + "." + restore_args["cloud_domain"],
     )
-    logger.info(metas_grouped)
 
     # query the server for backup secrets
     writer.write(
@@ -104,12 +100,10 @@ async def procedure():
     # read the the meta information
     dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
     stack_meta = pickle.loads((await reader.readexactly(dict_size)))
-    logger.info(stack_meta)
 
     namespace_secret_dict = pickle.loads(
         base64.b64decode(stack_meta["namespace_secret_dict_b64"])
     )
-    logger.info(namespace_secret_dict)
 
     # now we start the restore procedure
     config.load_incluster_config()
@@ -167,10 +161,11 @@ async def procedure():
         logger.info(f"restoring {orig_namespace}")
         restore_namespace = orig_namespace
 
-        for namespace_mapping in restore_args["namespace_mapping"]:
-            if namespace_mapping.startswith(orig_namespace):
-                restore_namespace = namespace_mapping.split(":")[1]
-                logger.info(f"namespace mapping matched {namespace_mapping}")
+        if restore_args["namespace_mapping"]:
+            for namespace_mapping in restore_args["namespace_mapping"]:
+                if namespace_mapping.startswith(orig_namespace):
+                    restore_namespace = namespace_mapping.split(":")[1]
+                    logger.info(f"namespace mapping matched {namespace_mapping}")
 
         logger.info(
             f"trying to restore volumes of {orig_namespace} into {restore_namespace}"

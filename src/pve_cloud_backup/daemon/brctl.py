@@ -127,8 +127,6 @@ async def launch_restore_job(args):
         get_ssh_master_kubeconfig(cluster_vars, args.stack_name)
     )
 
-    print(kubeconfig_dict)
-
     # init kube client for launching the restore job
     loader = KubeConfigLoader(config_dict=kubeconfig_dict)
     configuration = client.Configuration()

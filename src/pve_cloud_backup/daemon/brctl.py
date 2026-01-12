@@ -117,7 +117,7 @@ async def list_backups_remote(args):
         print(f"- timestamp {timestamp}")
 
 
-def launch_restore_job(args):
+async def launch_restore_job(args):
     # fetch the kubeconfig of the cluster we want to launch the restore job in
     online_pve_host = get_online_pve_host(args.target_pve)
     cluster_vars = get_cluster_vars(online_pve_host)
@@ -127,11 +127,15 @@ def launch_restore_job(args):
         get_ssh_master_kubeconfig(cluster_vars, args.stack_name)
     )
 
+    print(kubeconfig_dict)
+
     # init kube client for launching the restore job
     loader = KubeConfigLoader(config_dict=kubeconfig_dict)
     configuration = client.Configuration()
     loader.load_and_set(configuration)
-    batch_v1 = client.BatchV1Api()
+
+    api_instance = client.ApiClient(configuration)
+    batch_v1 = client.BatchV1Api(api_instance)
 
     serializable_args = vars(args).copy()
     serializable_args["func"] = args.func.__name__
@@ -197,7 +201,6 @@ def launch_restore_job(args):
     )
 
     # Launch the Job in the default namespace
-    batch_v1 = client.BatchV1Api()
     resp = batch_v1.create_namespaced_job(body=job, namespace="pve-cloud-backup")
 
     logger.info("Job created. Status='%s'" % str(resp.status))

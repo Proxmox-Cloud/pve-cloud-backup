@@ -2,8 +2,8 @@ import asyncio
 import logging
 import os
 import pickle
-import time
 import struct
+import time
 
 import zstandard as zstd
 from tinydb import Query, TinyDB

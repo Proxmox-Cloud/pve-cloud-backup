@@ -53,7 +53,7 @@ def get_backup_base_dir():
     elif os.getenv("PXC_BACKUP_BASE_DIR"):
         return os.getenv("PXC_BACKUP_BASE_DIR")
     else:
-        raise Exception("No env variables configured for any backup scenario!")
+        raise FileNotFoundError("No env variables configured for any backup scenario!")
 
 
 def init_backup_dir(backup_dir):

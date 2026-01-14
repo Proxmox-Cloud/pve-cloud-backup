@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import pickle
+import time
 import struct
 
 import zstandard as zstd
@@ -298,6 +299,17 @@ async def run():
 
 
 def main():
+    # wait for drive to be available
+    while True:
+        try:
+            get_backup_base_dir()
+            logger.info("Backup drive is available!")
+            break
+        except FileNotFoundError as e:
+            logger.debug(e)
+            logger.info("Backup drive not found, startup delayed.")
+            time.sleep(5)
+
     if ENV == "PRODUCTION":
         copy_backup_generic()
 

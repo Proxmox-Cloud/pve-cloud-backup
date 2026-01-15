@@ -42,56 +42,46 @@ async def list_backup_details_remote(args):
     metas = pickle.loads((await reader.readexactly(dict_size)))
 
     # first we group metas
-    k8s_stacks = {}
+    k8s_stack = metas[0]["stack"]
 
+    print(f"k8s stack {k8s_stack}:")
+
+    # query the server for backup secrets
+    writer.write((k8s_stack + "\n").encode())
+    await writer.drain()
+
+    # read the the meta information
+    dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+    stack_meta = pickle.loads((await reader.readexactly(dict_size)))
+
+    namespace_secret_dict = pickle.loads(
+        base64.b64decode(stack_meta["namespace_secret_dict_b64"])
+    )
+
+    namespace_k8s_metas = {}
+
+    # group metas by namespace
     for meta in metas:
-        if meta["type"] == "k8s":
-            if meta["stack"] not in k8s_stacks:
-                k8s_stacks[meta["stack"]] = []
+        if meta["namespace"] not in namespace_k8s_metas:
+            namespace_k8s_metas[meta["namespace"]] = []
 
-            k8s_stacks[meta["stack"]].append(meta)
-        else:
-            raise Exception(f"Invalid meta type found - meta {meta}")
+        namespace_k8s_metas[meta["namespace"]].append(meta)
 
-    for k8s_stack, k8s_metas in k8s_stacks.items():
-        print(f"  - k8s stack {k8s_stack}:")
-
-        # query the server for backup secrets
-        writer.write((k8s_stack + "\n").encode())
-        await writer.drain()
-
-        # read the the meta information
-        dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-        stack_meta = pickle.loads((await reader.readexactly(dict_size)))
-
-        namespace_secret_dict = pickle.loads(
-            base64.b64decode(stack_meta["namespace_secret_dict_b64"])
-        )
-
-        namespace_k8s_metas = {}
-
-        # group metas by namespace
+    for namespace, k8s_metas in namespace_k8s_metas.items():
+        print(f"- namespace {namespace}:")
+        print(f"  - volumes:")
         for meta in k8s_metas:
-            if meta["namespace"] not in namespace_k8s_metas:
-                namespace_k8s_metas[meta["namespace"]] = []
+            pvc_name = meta["pvc_name"]
+            pool = meta["pool"]
+            storage_class = meta["storage_class"]
+            print(
+                f"    - {pvc_name}, pool {pool}, storage class {storage_class}"
+            )
 
-            namespace_k8s_metas[meta["namespace"]].append(meta)
-
-        for namespace, k8s_metas in namespace_k8s_metas.items():
-            print(f"    - namespace {namespace}:")
-            print(f"      - volumes:")
-            for meta in k8s_metas:
-                pvc_name = meta["pvc_name"]
-                pool = meta["pool"]
-                storage_class = meta["storage_class"]
-                print(
-                    f"        - {pvc_name}, pool {pool}, storage class {storage_class}"
-                )
-
-            print(f"      - secrets:")
-            for secret in namespace_secret_dict[namespace]:
-                secret_name = secret["metadata"]["name"]
-                print(f"        - {secret_name}")
+        print(f"  - secrets:")
+        for secret in namespace_secret_dict[namespace]:
+            secret_name = secret["metadata"]["name"]
+            print(f"    - {secret_name}")
 
     # send a terminator
     writer.write("##BRCTL-DONE\n".encode())

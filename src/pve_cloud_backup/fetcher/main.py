@@ -27,7 +27,7 @@ proxmox = ProxmoxAPI(
 with open("/opt/backup-conf.yaml", "r") as file:
     backup_config = yaml.safe_load(file)
 
-backup_addr = backup_config["backup_daemon_address"]
+backup_addr = os.getenv("BDD_HOST"),
 
 # main is prod and always runs in cluster
 config.load_incluster_config()
@@ -63,38 +63,30 @@ async def run():
         logger.info("No patroni stack provided, skipping pgdump.")
 
     # backup vms and k8s
-    raw_k8s_meta = None
-    raw_vm_meta = None
+    namespace_volume_meta = None
     unique_pools = None
 
     try:
-        k8s_kubeconfigs = funcs.get_kubernetes_clients(
-            backup_config,
-            proxmox,
-            paramiko.Ed25519Key.from_private_key_file("/opt/id_qemu"),
+        namespace_secrets, namespace_volume_meta = funcs.collect_k8s_meta(
+            backup_config
         )
-        logger.debug(f"k8s_kubeconfigs:\n{pformat(k8s_kubeconfigs)}")
-
-        raw_k8s_meta, k8s_stack_namespace_secrets = funcs.collect_raw_k8s_meta(
-            backup_config, k8s_kubeconfigs
-        )
-        logger.debug(f"k8s_meta:\n{pformat(raw_k8s_meta)}")
+        logger.debug(f"volume_meta:\n{pformat(namespace_volume_meta)}")
 
         # this simply adds all the images to groups inside of ceph
-        unique_pools = funcs.pool_images(raw_k8s_meta)
+        unique_pools = funcs.pool_images(namespace_volume_meta)
 
         # create group snapshots
-        funcs.snap_and_clone(raw_k8s_meta, timestamp, unique_pools)
-        await funcs.send_backups(raw_k8s_meta, timestamp, backup_addr)
+        funcs.snap_and_clone(namespace_volume_meta, timestamp, unique_pools)
+        await funcs.send_backups(namespace_volume_meta, timestamp, backup_addr)
 
-        await funcs.post_image_meta(raw_k8s_meta, timestamp, backup_config, backup_addr)
-        await funcs.post_k8s_stack_meta(
-            k8s_kubeconfigs, k8s_stack_namespace_secrets, timestamp, backup_addr
+        await funcs.post_volume_meta(namespace_volume_meta, timestamp, backup_config["k8s_stack"], backup_addr)
+        await funcs.post_k8s_namespace_secrets(
+            namespace_secrets, timestamp, backup_config["k8s_stack"], backup_addr
         )
 
     finally:
         # we always want to do the cleanup even if something failed
-        funcs.cleanup(raw_vm_meta, raw_k8s_meta, timestamp, unique_pools)
+        funcs.cleanup(namespace_volume_meta, timestamp, unique_pools)
 
 
 def main():

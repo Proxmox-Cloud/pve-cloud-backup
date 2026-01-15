@@ -25,26 +25,6 @@ logging.basicConfig(level=log_level)
 logger = logging.getLogger("pxc-restore")
 
 
-def group_image_metas(metas, type_keys, group_key, stack_filter=None):
-    metas_grouped = {}
-
-    # group metas by vmid
-    for meta in metas:
-        # kind of redundant right now since we only process k8s
-        if not meta["type"] in type_keys:
-            continue  # skip non fitting
-
-        if stack_filter and meta["stack"] != stack_filter:
-            continue  # skip filtered out stack
-
-        if meta[group_key] not in metas_grouped:
-            metas_grouped[meta[group_key]] = []
-
-        metas_grouped[meta[group_key]].append(meta)
-
-    return metas_grouped
-
-
 # these functions are necessary to convert python k8s naming to camel case
 def to_camel_case(snake_str):
     components = snake_str.split("_")
@@ -82,12 +62,14 @@ async def procedure():
     dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
     metas = pickle.loads((await reader.readexactly(dict_size)))
 
-    metas_grouped = group_image_metas(
-        metas,
-        ["k8s"],
-        "namespace",
-        restore_args["stack_name"] + "." + restore_args["cloud_domain"],
-    )
+    metas_grouped_by_ns = {}
+    
+    for meta in metas:
+        if meta["namespace"] not in metas_grouped_by_ns:
+            metas_grouped_by_ns[meta["namespace"]] = []
+
+        metas_grouped_by_ns[meta["namespace"]].append(meta)
+
 
     # query the server for backup secrets
     writer.write(
@@ -154,7 +136,7 @@ async def procedure():
     )
 
     logger.info("restoring namespaces")
-    for orig_namespace, metas_group in metas_grouped.items():
+    for orig_namespace, metas_group in metas_grouped_by_ns.items():
         if filter_namespaces and orig_namespace not in filter_namespaces:
             continue  # skip filtered out namespaces
 

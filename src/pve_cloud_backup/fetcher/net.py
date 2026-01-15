@@ -115,9 +115,9 @@ async def meta(backup_addr, cmd, meta_dict):
     await writer.wait_closed()
 
 
-async def image_meta(backup_addr, meta_dict):
-    await meta(backup_addr, Command.IMAGE_META, meta_dict)
+async def volume_meta(backup_addr, meta_dict):
+    await meta(backup_addr, Command.VOLUME_META, meta_dict)
 
 
-async def stack_meta(backup_addr, meta_dict):
-    await meta(backup_addr, Command.STACK_META, meta_dict)
+async def namespace_secrets(backup_addr, meta_dict):
+    await meta(backup_addr, Command.NAMESPACE_SECRETS, meta_dict)

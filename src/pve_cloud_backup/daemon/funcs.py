@@ -84,8 +84,8 @@ def copy_backup_generic():
                 shutil.copy2(full_source_path, full_dest_path)
 
 
-def get_image_metas(timestamp_filter=None):
-    image_meta_db = TinyDB(f"{get_backup_base_dir()}/image-meta-db.json")
+def get_volume_metas(timestamp_filter=None):
+    volume_meta_db = TinyDB(f"{get_backup_base_dir()}/volume-meta-db.json")
 
     archives = []
 
@@ -122,7 +122,7 @@ def get_image_metas(timestamp_filter=None):
             timestamp_archives[timestamp] = []
 
         Meta = Query()
-        image_meta = image_meta_db.get(
+        image_meta = volume_meta_db.get(
             (Meta.image_name == image) & (Meta.timestamp == timestamp)
         )
 

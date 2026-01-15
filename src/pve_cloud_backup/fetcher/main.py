@@ -27,7 +27,7 @@ proxmox = ProxmoxAPI(
 with open("/opt/backup-conf.yaml", "r") as file:
     backup_config = yaml.safe_load(file)
 
-backup_addr = os.getenv("BDD_HOST"),
+backup_addr = (os.getenv("BDD_HOST"),)
 
 # main is prod and always runs in cluster
 config.load_incluster_config()
@@ -67,9 +67,7 @@ async def run():
     unique_pools = None
 
     try:
-        namespace_secrets, namespace_volume_meta = funcs.collect_k8s_meta(
-            backup_config
-        )
+        namespace_secrets, namespace_volume_meta = funcs.collect_k8s_meta(backup_config)
         logger.debug(f"volume_meta:\n{pformat(namespace_volume_meta)}")
 
         # this simply adds all the images to groups inside of ceph
@@ -79,7 +77,9 @@ async def run():
         funcs.snap_and_clone(namespace_volume_meta, timestamp, unique_pools)
         await funcs.send_backups(namespace_volume_meta, timestamp, backup_addr)
 
-        await funcs.post_volume_meta(namespace_volume_meta, timestamp, backup_config["k8s_stack"], backup_addr)
+        await funcs.post_volume_meta(
+            namespace_volume_meta, timestamp, backup_config["k8s_stack"], backup_addr
+        )
         await funcs.post_k8s_namespace_secrets(
             namespace_secrets, timestamp, backup_config["k8s_stack"], backup_addr
         )

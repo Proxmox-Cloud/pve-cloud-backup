@@ -63,13 +63,12 @@ async def procedure():
     metas = pickle.loads((await reader.readexactly(dict_size)))
 
     metas_grouped_by_ns = {}
-    
+
     for meta in metas:
         if meta["namespace"] not in metas_grouped_by_ns:
             metas_grouped_by_ns[meta["namespace"]] = []
 
         metas_grouped_by_ns[meta["namespace"]].append(meta)
-
 
     # query the server for backup secrets
     writer.write(

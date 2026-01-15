@@ -5,7 +5,6 @@ import logging
 import os
 import pickle
 import subprocess
-from pprint import pformat
 
 import paramiko
 import yaml
@@ -32,7 +31,7 @@ def collect_k8s_meta(backup_config):
 
         if namespace not in backup_config["k8s_namespaces"]:
             continue
-        
+
         volume_meta = []
 
         # collect secrets of namespace
@@ -71,10 +70,8 @@ def collect_k8s_meta(backup_config):
                     }
                 )
             else:
-                logger.debug(
-                    f"PVC: {pvc_name} -> Not bound to a PV [Status: {status}]"
-                )
-        
+                logger.debug(f"PVC: {pvc_name} -> Not bound to a PV [Status: {status}]")
+
         namespace_volume_meta[namespace] = volume_meta
 
     return namespace_secrets, namespace_volume_meta

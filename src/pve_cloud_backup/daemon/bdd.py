@@ -186,8 +186,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                     Meta = Query()
                     ns_secrets = secret_db.get(
-                        (Meta.timestamp == timestamp)
-                        & (Meta.stack == stack)
+                        (Meta.timestamp == timestamp) & (Meta.stack == stack)
                     )
 
                     meta_pickled = pickle.dumps(ns_secrets)
@@ -228,8 +227,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                     Meta = Query()
                     ns_secrets = secret_db.get(
-                        (Meta.timestamp == timestamp)
-                        & (Meta.stack == stack)
+                        (Meta.timestamp == timestamp) & (Meta.stack == stack)
                     )
 
                     meta_pickled = pickle.dumps(ns_secrets)

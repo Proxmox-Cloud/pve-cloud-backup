@@ -74,9 +74,7 @@ async def list_backup_details_remote(args):
             pvc_name = meta["pvc_name"]
             pool = meta["pool"]
             storage_class = meta["storage_class"]
-            print(
-                f"    - {pvc_name}, pool {pool}, storage class {storage_class}"
-            )
+            print(f"    - {pvc_name}, pool {pool}, storage class {storage_class}")
 
         print(f"  - secrets:")
         for secret in namespace_secret_dict[namespace]:

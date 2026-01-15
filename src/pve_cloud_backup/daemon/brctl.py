@@ -6,6 +6,8 @@ import logging
 import os
 import pickle
 import struct
+import gzip
+from pprint import pprint
 
 import yaml
 from kubernetes import client
@@ -76,10 +78,28 @@ async def list_backup_details_remote(args):
             storage_class = meta["storage_class"]
             print(f"    - {pvc_name}, pool {pool}, storage class {storage_class}")
 
+        helm_releases = {}
+
         print(f"  - secrets:")
         for secret in namespace_secret_dict[namespace]:
             secret_name = secret["metadata"]["name"]
-            print(f"    - {secret_name}")
+        
+            if secret_name.startswith("sh.helm.release.v1."):
+                release_split = secret_name.removeprefix("sh.helm.release.v1.").split(".")
+                release_name = release_split[0]
+                release_num = int(release_split[1].removeprefix("v"))
+                # collect the latest helm release
+                if not release_name in helm_releases or int(helm_releases[release_name]["metadata"]["name"].removeprefix(f"sh.helm.release.v1.{release_name}.v")) < release_num:
+                    helm_releases[release_name] = secret
+            else:
+                print(f"    - {secret_name}") # print non helm secrets
+
+        if helm_releases:
+            print("  - helm releases:")
+            for release_name, release_secret in helm_releases.items():
+                release_info = json.loads(gzip.decompress(base64.b64decode(base64.b64decode(release_secret["data"]["release"]))))
+                print(f"    - {release_info['chart']['metadata']['name']} - version: {release_info['chart']['metadata']['version']}")
+
 
     # send a terminator
     writer.write("##BRCTL-DONE\n".encode())
@@ -106,13 +126,16 @@ async def list_backups_remote(args):
 
 
 async def launch_restore_job(args):
+    with open(args.inventory, "r") as file:
+        kubespray_inv = yaml.safe_load(file)
+
     # fetch the kubeconfig of the cluster we want to launch the restore job in
-    online_pve_host = get_online_pve_host(args.target_pve)
+    online_pve_host = get_online_pve_host(kubespray_inv["target_pve"])
     cluster_vars = get_cluster_vars(online_pve_host)
-    cloud_domain = get_cloud_domain(args.target_pve)
+    cloud_domain = get_cloud_domain(kubespray_inv["target_pve"])
 
     kubeconfig_dict = yaml.safe_load(
-        get_ssh_master_kubeconfig(cluster_vars, args.stack_name)
+        get_ssh_master_kubeconfig(cluster_vars, kubespray_inv["stack_name"])
     )
 
     # init kube client for launching the restore job
@@ -131,7 +154,7 @@ async def launch_restore_job(args):
         V1EnvVar(
             name="PXC_RESTORE_ARGS",
             value=base64.b64encode(
-                json.dumps(serializable_args | {"cloud_domain": cloud_domain}).encode()
+                json.dumps(serializable_args | {"cloud_domain": cloud_domain, "stack_name": kubespray_inv["stack_name"]}).encode()
             ).decode(),
         ),
     ]
@@ -236,15 +259,9 @@ def get_parser():
         required=True,
     )
     k8s_restore_parser.add_argument(
-        "--stack-name",
+        "--inventory",
         type=str,
-        help="Proxmox cloud k8s stack name where restore job will be launched. Requires pve-cloud-backup namespace installed via terraform-pxc-backup.",
-        required=True,
-    )
-    k8s_restore_parser.add_argument(
-        "--target-pve",
-        type=str,
-        help="Proxmox cluster where the k8s cluster we want to restore in is running.",
+        help="PVE cloud kubespray inventory yaml file, in this cluster the restore job will be launched.",
         required=True,
     )
     k8s_restore_parser.add_argument(

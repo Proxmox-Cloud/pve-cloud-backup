@@ -27,7 +27,7 @@ proxmox = ProxmoxAPI(
 with open("/opt/backup-conf.yaml", "r") as file:
     backup_config = yaml.safe_load(file)
 
-backup_addr = (os.getenv("BDD_HOST"),)
+backup_addr = os.getenv("BDD_HOST")
 
 # main is prod and always runs in cluster
 config.load_incluster_config()

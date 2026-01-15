@@ -296,7 +296,7 @@ async def post_k8s_namespace_secrets(
 ):
 
     namespace_secret_dict_b64 = base64.b64encode(
-        pickle.dumps(namespace_secrets[k8s_stack])
+        pickle.dumps(namespace_secrets)
     ).decode("utf-8")
     body = {
         "timestamp": timestamp,

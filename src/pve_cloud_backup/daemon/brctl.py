@@ -1,13 +1,12 @@
 import argparse
 import asyncio
 import base64
+import gzip
 import json
 import logging
 import os
 import pickle
 import struct
-import gzip
-from pprint import pprint
 
 import yaml
 from kubernetes import client
@@ -83,23 +82,40 @@ async def list_backup_details_remote(args):
         print(f"  - secrets:")
         for secret in namespace_secret_dict[namespace]:
             secret_name = secret["metadata"]["name"]
-        
+
             if secret_name.startswith("sh.helm.release.v1."):
-                release_split = secret_name.removeprefix("sh.helm.release.v1.").split(".")
+                release_split = secret_name.removeprefix("sh.helm.release.v1.").split(
+                    "."
+                )
                 release_name = release_split[0]
                 release_num = int(release_split[1].removeprefix("v"))
                 # collect the latest helm release
-                if not release_name in helm_releases or int(helm_releases[release_name]["metadata"]["name"].removeprefix(f"sh.helm.release.v1.{release_name}.v")) < release_num:
+                if (
+                    not release_name in helm_releases
+                    or int(
+                        helm_releases[release_name]["metadata"]["name"].removeprefix(
+                            f"sh.helm.release.v1.{release_name}.v"
+                        )
+                    )
+                    < release_num
+                ):
                     helm_releases[release_name] = secret
             else:
-                print(f"    - {secret_name}") # print non helm secrets
+                print(f"    - {secret_name}")  # print non helm secrets
 
         if helm_releases:
             print("  - helm releases:")
             for release_name, release_secret in helm_releases.items():
-                release_info = json.loads(gzip.decompress(base64.b64decode(base64.b64decode(release_secret["data"]["release"]))))
-                print(f"    - {release_info['chart']['metadata']['name']} - version: {release_info['chart']['metadata']['version']}")
-
+                release_info = json.loads(
+                    gzip.decompress(
+                        base64.b64decode(
+                            base64.b64decode(release_secret["data"]["release"])
+                        )
+                    )
+                )
+                print(
+                    f"    - {release_info['chart']['metadata']['name']} - version: {release_info['chart']['metadata']['version']}"
+                )
 
     # send a terminator
     writer.write("##BRCTL-DONE\n".encode())
@@ -154,7 +170,13 @@ async def launch_restore_job(args):
         V1EnvVar(
             name="PXC_RESTORE_ARGS",
             value=base64.b64encode(
-                json.dumps(serializable_args | {"cloud_domain": cloud_domain, "stack_name": kubespray_inv["stack_name"]}).encode()
+                json.dumps(
+                    serializable_args
+                    | {
+                        "cloud_domain": cloud_domain,
+                        "stack_name": kubespray_inv["stack_name"],
+                    }
+                ).encode()
             ).decode(),
         ),
     ]

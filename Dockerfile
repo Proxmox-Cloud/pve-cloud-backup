@@ -1,4 +1,4 @@
-FROM debian:bookworm
+FROM debian:trixie
 
 # empty by default, using official pypi
 ARG LOCAL_PYPI_IP

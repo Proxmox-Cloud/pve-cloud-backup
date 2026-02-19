@@ -1,5 +1,5 @@
 # pessimistic operator for local tdd installs (pip install -e .)
-py-pve-cloud>=0.15.11,<0.16.0
+py-pve-cloud==0.15.12rc0
 kubernetes==34.1.0
 requests==2.32.5
 zstandard==0.25.0

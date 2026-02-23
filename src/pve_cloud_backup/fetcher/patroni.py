@@ -14,6 +14,9 @@ async def backup_patroni(backup_addr, timestamp, proxmox, stack_fqdn, pkey):
     patroni_member = None
 
     for node in proxmox.nodes.get():
+        if patroni_member:
+            break # found our member
+
         node_name = node["node"]
         logger.info("collecting node " + node_name)
 
@@ -39,8 +42,8 @@ async def backup_patroni(backup_addr, timestamp, proxmox, stack_fqdn, pkey):
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-    logger.info("connecting to patroni member " + lxc["name"] + "." + stack_apex)
-    ssh.connect(lxc["name"] + "." + stack_apex, username="root", pkey=pkey)
+    logger.info("connecting to patroni member " + patroni_member["name"] + "." + stack_apex)
+    ssh.connect(patroni_member["name"] + "." + stack_apex, username="root", pkey=pkey)
 
     # create pg pass file
     _, stdout, _ = ssh.exec_command(

@@ -21,6 +21,7 @@ from pve_cloud.lib.inventory import get_online_pve_host
 from pve_cloud_backup._version import __version__ as bkp_version
 
 from pve_cloud_backup.daemon.rpc import Command
+from pve_cloud_backup.daemon.funcs import get_backup_base_dir
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -226,7 +227,7 @@ async def launch_restore_job(args):
         api_version="batch/v1",
         kind="Job",
         metadata=V1ObjectMeta(
-            name=f"pxc-restore-job-{args.timestamp.replace("_", "-")}"
+            name=f"pxc-restore-job-{args.timestamp.replace('_', '-')}"
         ),
         spec=job_spec,
     )
@@ -235,6 +236,10 @@ async def launch_restore_job(args):
     resp = batch_v1.create_namespaced_job(body=job, namespace="pve-cloud-backup")
 
     logger.info("Job created. Status='%s'" % str(resp.status))
+
+
+async def print_backup_base_dir(args):
+    print(get_backup_base_dir(), end="")
 
 
 def get_parser():
@@ -323,6 +328,13 @@ def get_parser():
         help="Custom image for launching restore job (e2e test arg).",
     )
     k8s_restore_parser.set_defaults(func=launch_restore_job)
+
+    base_dir_parser = subparsers.add_parser(
+        "get-base-dir",
+        help="Returns the base dir assuming the correct env variables are set (needed for cron cleanup script).",
+
+    )
+    base_dir_parser.set_defaults(func=print_backup_base_dir)
 
     return parser
 

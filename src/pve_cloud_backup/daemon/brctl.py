@@ -20,8 +20,8 @@ from pve_cloud.cli.pvclu import (get_cloud_domain, get_cluster_vars,
 from pve_cloud.lib.inventory import get_online_pve_host
 from pve_cloud_backup._version import __version__ as bkp_version
 
-from pve_cloud_backup.daemon.rpc import Command
 from pve_cloud_backup.daemon.funcs import get_backup_base_dir
+from pve_cloud_backup.daemon.rpc import Command
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -332,7 +332,6 @@ def get_parser():
     base_dir_parser = subparsers.add_parser(
         "get-base-dir",
         help="Returns the base dir assuming the correct env variables are set (needed for cron cleanup script).",
-
     )
     base_dir_parser.set_defaults(func=print_backup_base_dir)
 

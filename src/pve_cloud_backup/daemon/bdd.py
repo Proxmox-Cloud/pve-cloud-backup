@@ -294,9 +294,7 @@ async def run():
         certfile=f"{certs_dir}/server_cert.crt",
         keyfile=f"{certs_dir}/server_private_key.key",
     )
-    server = await asyncio.start_server(
-        handle_client, "0.0.0.0", 8085, ssl=ssl_context
-    )
+    server = await asyncio.start_server(handle_client, "0.0.0.0", 8085, ssl=ssl_context)
     addr = server.sockets[0].getsockname()
     logger.info(f"Serving on {addr}")
     async with server:

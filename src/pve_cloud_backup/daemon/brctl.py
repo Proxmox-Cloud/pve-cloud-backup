@@ -17,7 +17,7 @@ from kubernetes.client import (V1ConfigMapVolumeSource, V1Container, V1EnvVar,
                                V1Volume, V1VolumeMount)
 from kubernetes.config.kube_config import KubeConfigLoader
 from pve_cloud.cli.pvclu import (get_cloud_domain, get_cluster_vars,
-                                  get_ssh_master_kubeconfig)
+                                 get_ssh_master_kubeconfig)
 from pve_cloud.lib.inventory import get_online_pve_host
 from pve_cloud_backup._version import __version__ as bkp_version
 
@@ -131,7 +131,7 @@ async def list_backup_details_remote(args):
 
 
 async def list_backups_remote(args):
-    
+
     ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ssl_ctx.check_hostname = False
     ssl_ctx.verify_mode = ssl.CERT_NONE

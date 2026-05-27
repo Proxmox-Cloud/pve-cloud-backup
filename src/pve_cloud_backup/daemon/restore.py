@@ -19,7 +19,6 @@ from tinydb import Query, TinyDB
 
 from pve_cloud_backup.daemon.rpc import Command
 
-
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
 

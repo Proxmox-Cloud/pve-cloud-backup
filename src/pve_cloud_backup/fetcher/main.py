@@ -14,6 +14,7 @@ from pve_cloud_backup.fetcher.git import backup_git
 from pve_cloud_backup.fetcher.nextcloud import backup_nextcloud
 from pve_cloud_backup.fetcher.patroni import backup_patroni
 
+
 logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "DEBUG").upper()))
 logger = logging.getLogger("fetcher")
 

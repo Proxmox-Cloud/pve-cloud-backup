@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import pickle
+import ssl
 import struct
 import subprocess
 import time
@@ -17,6 +18,7 @@ from kubernetes.client.rest import ApiException
 from tinydb import Query, TinyDB
 
 from pve_cloud_backup.daemon.rpc import Command
+
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -50,7 +52,15 @@ async def procedure():
     logger.info(restore_args)
 
     # connect to the backup server and start the restore procedure
-    reader, writer = await asyncio.open_connection(restore_args["bdd_host"], 8085)
+    # we simply trust the host here as the ca is only available from
+    # postgres secrets
+    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    reader, writer = await asyncio.open_connection(
+        restore_args["bdd_host"], 8085, ssl=ssl_ctx
+    )
     writer.write(struct.pack("B", Command.RESTORE_PROCEDURE.value))
     await writer.drain()
 

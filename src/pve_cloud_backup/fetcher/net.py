@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 import pickle
+import ssl
 import struct
 
 import zstandard as zstd
@@ -8,6 +10,16 @@ import zstandard as zstd
 from pve_cloud_backup.daemon.rpc import Command
 
 logger = logging.getLogger("fetcher")
+
+
+def get_strict_client_ssl_ctx():
+    ca_cert_path = os.getenv("BDD_CA_CERT_PATH")
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.load_verify_locations(ca_cert_path)
+    ctx.verify_mode = ssl.CERT_REQUIRED
+
+    return ctx
 
 
 async def archive_init(reader, writer, request_dict):
@@ -46,7 +58,9 @@ async def send_cchunk(writer, compressed_chunk):
 
 async def archive_async(backup_addr, request_dict, chunk_generator):
     logger.info(request_dict)
-    reader, writer = await asyncio.open_connection(backup_addr, 8085)
+    reader, writer = await asyncio.open_connection(
+        backup_addr, 8085, ssl=get_strict_client_ssl_ctx()
+    )
 
     await archive_init(reader, writer, request_dict)
 
@@ -72,7 +86,9 @@ async def archive_async(backup_addr, request_dict, chunk_generator):
 
 async def archive(backup_addr, request_dict, chunk_generator):
     logger.info(request_dict)
-    reader, writer = await asyncio.open_connection(backup_addr, 8085)
+    reader, writer = await asyncio.open_connection(
+        backup_addr, 8085, ssl=get_strict_client_ssl_ctx()
+    )
 
     await archive_init(reader, writer, request_dict)
 
@@ -97,7 +113,9 @@ async def archive(backup_addr, request_dict, chunk_generator):
 
 
 async def meta(backup_addr, cmd, meta_dict):
-    reader, writer = await asyncio.open_connection(backup_addr, 8085)
+    reader, writer = await asyncio.open_connection(
+        backup_addr, 8085, ssl=get_strict_client_ssl_ctx()
+    )
     writer.write(struct.pack("B", cmd.value))
     await writer.drain()
 

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import pickle
+import ssl
 import struct
 import time
 
@@ -287,7 +288,15 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def run():
-    server = await asyncio.start_server(handle_client, "0.0.0.0", 8085)
+    certs_dir = "/opt/bdd/certs"
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(
+        certfile=f"{certs_dir}/server_cert.crt",
+        keyfile=f"{certs_dir}/server_private_key.key",
+    )
+    server = await asyncio.start_server(
+        handle_client, "0.0.0.0", 8085, ssl=ssl_context
+    )
     addr = server.sockets[0].getsockname()
     logger.info(f"Serving on {addr}")
     async with server:

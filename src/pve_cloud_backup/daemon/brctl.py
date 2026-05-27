@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pickle
+import ssl
 import struct
 
 import yaml
@@ -16,7 +17,7 @@ from kubernetes.client import (V1ConfigMapVolumeSource, V1Container, V1EnvVar,
                                V1Volume, V1VolumeMount)
 from kubernetes.config.kube_config import KubeConfigLoader
 from pve_cloud.cli.pvclu import (get_cloud_domain, get_cluster_vars,
-                                 get_ssh_master_kubeconfig)
+                                  get_ssh_master_kubeconfig)
 from pve_cloud.lib.inventory import get_online_pve_host
 from pve_cloud_backup._version import __version__ as bkp_version
 
@@ -31,7 +32,13 @@ logger = logging.getLogger("brctl")
 
 
 async def list_backup_details_remote(args):
-    reader, writer = await asyncio.open_connection(args.bdd_host, 8085)
+    # cli trusts the server without verifying
+    # fetching ca is too inconvinient
+    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    reader, writer = await asyncio.open_connection(args.bdd_host, 8085, ssl=ssl_ctx)
     writer.write(struct.pack("B", Command.LIST_BACKUP_DETAILS.value))
     await writer.drain()
 
@@ -124,7 +131,12 @@ async def list_backup_details_remote(args):
 
 
 async def list_backups_remote(args):
-    reader, writer = await asyncio.open_connection(args.bdd_host, 8085)
+    
+    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    reader, writer = await asyncio.open_connection(args.bdd_host, 8085, ssl=ssl_ctx)
     writer.write(struct.pack("B", Command.LIST_BACKUPS.value))
     await writer.drain()
 

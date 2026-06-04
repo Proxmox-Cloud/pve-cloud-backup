@@ -161,7 +161,9 @@ async def launch_restore_job(args):
     # fetch the kubeconfig of the cluster we want to launch the restore job in
     online_pve_host, jump_host = get_online_pve_host(kubespray_inv["target_pve"])
     if jump_host:
-        raise NotImplementedError("Jump host functionality not yet implemented for backup restore!")
+        raise NotImplementedError(
+            "Jump host functionality not yet implemented for backup restore!"
+        )
 
     cluster_vars = get_cluster_vars(online_pve_host)
     cloud_domain = get_cloud_domain(kubespray_inv["target_pve"])

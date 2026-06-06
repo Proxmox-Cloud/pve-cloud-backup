@@ -16,10 +16,10 @@ from kubernetes.client import (V1ConfigMapVolumeSource, V1Container, V1EnvVar,
                                V1PodTemplateSpec, V1SecretVolumeSource,
                                V1Volume, V1VolumeMount)
 from kubernetes.config.kube_config import KubeConfigLoader
-from pve_cloud.cli.pvclu import (get_cloud_domain,
-                                 get_ssh_master_kubeconfig,
+from pve_cloud.cli.pvclu import (get_cloud_domain, get_ssh_master_kubeconfig,
                                  get_ssh_remote_master_kubeconfig)
-from pve_cloud.lib.inventory import get_online_pve_host_from_target_pve, get_cluster_vars
+from pve_cloud.lib.inventory import (get_cluster_vars,
+                                     get_online_pve_host_from_target_pve)
 from pve_cloud_backup._version import __version__ as bkp_version
 
 from pve_cloud_backup.daemon.funcs import get_backup_base_dir
@@ -160,7 +160,9 @@ async def launch_restore_job(args):
         kubespray_inv = yaml.safe_load(file)
 
     # fetch the kubeconfig of the cluster we want to launch the restore job in
-    online_pve_host, jump_host = get_online_pve_host_from_target_pve(kubespray_inv["target_pve"])
+    online_pve_host, jump_host = get_online_pve_host_from_target_pve(
+        kubespray_inv["target_pve"]
+    )
 
     external_cp_defined = (
         "extra_control_plane_sans" in kubespray_inv

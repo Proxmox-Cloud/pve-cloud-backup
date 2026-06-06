@@ -16,10 +16,10 @@ from kubernetes.client import (V1ConfigMapVolumeSource, V1Container, V1EnvVar,
                                V1PodTemplateSpec, V1SecretVolumeSource,
                                V1Volume, V1VolumeMount)
 from kubernetes.config.kube_config import KubeConfigLoader
-from pve_cloud.cli.pvclu import (get_cloud_domain, get_cluster_vars,
+from pve_cloud.cli.pvclu import (get_cloud_domain,
                                  get_ssh_master_kubeconfig,
                                  get_ssh_remote_master_kubeconfig)
-from pve_cloud.lib.inventory import get_online_pve_host
+from pve_cloud.lib.inventory import get_online_pve_host_from_target_pve, get_cluster_vars
 from pve_cloud_backup._version import __version__ as bkp_version
 
 from pve_cloud_backup.daemon.funcs import get_backup_base_dir
@@ -160,7 +160,7 @@ async def launch_restore_job(args):
         kubespray_inv = yaml.safe_load(file)
 
     # fetch the kubeconfig of the cluster we want to launch the restore job in
-    online_pve_host, jump_host = get_online_pve_host(kubespray_inv["target_pve"])
+    online_pve_host, jump_host = get_online_pve_host_from_target_pve(kubespray_inv["target_pve"])
 
     external_cp_defined = (
         "extra_control_plane_sans" in kubespray_inv
@@ -172,13 +172,11 @@ async def launch_restore_job(args):
             "Jump host functionality requires external san to be set for the kubernetes cluster!"
         )
 
-    cluster_vars = get_cluster_vars(online_pve_host)
     cloud_domain = get_cloud_domain(kubespray_inv["target_pve"])
 
     if jump_host:
         kubeconfig_dict = yaml.safe_load(
             get_ssh_remote_master_kubeconfig(
-                cluster_vars,
                 kubespray_inv["stack_name"],
                 kubespray_inv["extra_control_plane_sans"][0],
                 jump_host,
@@ -186,6 +184,8 @@ async def launch_restore_job(args):
             )
         )
     else:
+        cluster_vars = get_cluster_vars(online_pve_host)
+
         kubeconfig_dict = yaml.safe_load(
             get_ssh_master_kubeconfig(cluster_vars, kubespray_inv["stack_name"])
         )

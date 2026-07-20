@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import pickle
+import asyncssh
 import subprocess
 
 import paramiko
@@ -15,9 +16,11 @@ import pve_cloud_backup.fetcher.net as net
 
 logger = logging.getLogger("fetcher")
 
+SUPPORTED_PROVISIONERS = ["rbd.csi.ceph.com", "zfs.csi.openebs.io"]
+
 
 # collect pvc and pv information, aswell as secrets of namespaces
-def collect_k8s_meta(backup_config):
+def collect_k8s_meta(backup_config, provisioner):
 
     config.load_incluster_config()
     v1 = client.CoreV1Api()
@@ -42,6 +45,7 @@ def collect_k8s_meta(backup_config):
 
         pvc_list = v1.list_namespaced_persistent_volume_claim(namespace=namespace)
 
+        namespace_driver = None # check flag => backup currently only supports homogeneus namespaces
         for pvc in pvc_list.items:
             pvc_name = pvc.metadata.name
             volume_name = pvc.spec.volume_name
@@ -49,6 +53,19 @@ def collect_k8s_meta(backup_config):
 
             if volume_name:
                 pv = v1.read_persistent_volume(name=volume_name)
+                if not namespace_driver:
+                    namespace_driver = pv.spec.csi.driver
+
+                # make sure no mixed drivers in backup ns
+                if pv.spec.csi.driver != namespace_driver:
+                    raise RuntimeError(f"Backup tool currently doesnt supported mixed csi driver namespaces: {namespace_driver} + {pv.spec.csi.driver} found!")
+
+                if pv.spec.csi.driver not in SUPPORTED_PROVISIONERS:
+                    raise ValueError(f"Backup for unsupported provisioner on {namespace} {pvc_name}")
+
+                if pv.spec.csi.driver != provisioner:
+                    continue # skip not targeted vols
+
                 pv_dict_b64 = base64.b64encode(pickle.dumps(pv.to_dict())).decode(
                     "utf-8"
                 )
@@ -57,22 +74,30 @@ def collect_k8s_meta(backup_config):
                     "utf-8"
                 )
 
-                volume_meta.append(
-                    {
+                meta = {
                         "namespace": namespace,
                         "pvc_name": pvc_name,
+                        "pv_name": pv.metadata.name,
                         "namespace": namespace,
-                        "image_name": pv.spec.csi.volume_attributes["imageName"],
-                        "pool": pv.spec.csi.volume_attributes["pool"],
+                        "csi_spec": pv.spec.csi,
                         "pvc_dict_b64": pvc_dict_b64,
                         "pv_dict_b64": pv_dict_b64,
-                        "storage_class": pvc.spec.storage_class_name,
+                        "storage_class": pvc.spec.storage_class_name
                     }
-                )
+
+                if pv.spec.node_affinity and pv.spec.node_affinity.required:
+                    meta["required_affinity"] = pv.spec.node_affinity.required
+
+                volume_meta.append(meta)
             else:
                 logger.debug(f"PVC: {pvc_name} -> Not bound to a PV [Status: {status}]")
 
-        namespace_volume_meta[namespace] = volume_meta
+        if volume_meta: # only set on content
+            namespace_volume_meta[namespace] = volume_meta
+        else:
+            # remove fetched secrets
+            logger.debug(f"No secrets found for provisioner {provisioner} removing namespace {namespace} secrets")
+            namespace_secrets.pop(namespace)
 
     return namespace_secrets, namespace_volume_meta
 
@@ -84,7 +109,7 @@ def pool_images(namespace_volume_meta):
     # collect pools from k8s volumes
     for volume_meta in namespace_volume_meta.values():
         for meta in volume_meta:
-            unique_pools.add(meta["pool"])
+            unique_pools.add(meta["csi_spec"].volume_attributes["pool"])
 
     # create rbd groups
     for pool in unique_pools:
@@ -104,8 +129,8 @@ def pool_images(namespace_volume_meta):
     # add rbds from pvcs
     for volume_meta in namespace_volume_meta.values():
         for meta in volume_meta:
-            pool = meta["pool"]
-            image = meta["image_name"]
+            pool = meta["csi_spec"].volume_attributes["pool"]
+            image = meta["csi_spec"].volume_attributes["imageName"]
             try:
                 subprocess.run(
                     [
@@ -194,8 +219,8 @@ def snap_and_clone(namespace_volume_meta, timestamp, unique_pools):
     # sadly there isnt yet a direct export function for group snapshots
     for volume_meta in namespace_volume_meta.values():
         for meta in volume_meta:
-            pool = meta["pool"]
-            image = meta["image_name"]
+            pool = meta["csi_spec"].volume_attributes["pool"]
+            image = meta["csi_spec"].volume_attributes["imageName"]
             clone(pool, image, timestamp)
 
 
@@ -235,8 +260,8 @@ async def send_backups(namespace_volume_meta, timestamp, backup_addr):
 
     for volume_meta in namespace_volume_meta.values():
         for meta in volume_meta:
-            pool = meta["pool"]
-            image = meta["image_name"]
+            pool = meta["csi_spec"].volume_attributes["pool"]
+            image = meta["csi_spec"].volume_attributes["imageName"]
 
             params = {
                 "timestamp": timestamp,
@@ -272,8 +297,17 @@ async def send_backups(namespace_volume_meta, timestamp, backup_addr):
 async def post_volume_meta(namespace_volume_meta, timestamp, k8s_stack, backup_addr):
     for volume_meta in namespace_volume_meta.values():
         for meta in volume_meta:
-            pool = meta["pool"]
-            image = meta["image_name"]
+            pool = None
+            image = None
+            if meta['csi_spec'].driver == "rbd.csi.ceph.com":
+                pool = meta["csi_spec"].volume_attributes["pool"]
+                image = meta["csi_spec"].volume_attributes["imageName"]
+            elif meta['csi_spec'].driver == "zfs.csi.openebs.io":
+                pool = meta["csi_spec"].volume_attributes["openebs.io/poolname"]
+                image = meta["pv_name"]
+            else:
+                raise RuntimeError(f"Unsupported csi driver {meta['csi_spec'].driver}")
+
             body = {
                 "timestamp": timestamp,
                 "image_name": image,
@@ -314,8 +348,8 @@ def cleanup(namespace_volume_meta, timestamp, unique_pools):
     if namespace_volume_meta is not None:
         for volume_meta in namespace_volume_meta.values():
             for meta in volume_meta:
-                pool = meta["pool"]
-                image = meta["image_name"]
+                pool = meta["csi_spec"].volume_attributes["pool"]
+                image = meta["csi_spec"].volume_attributes["imageName"]
                 try:
                     subprocess.run(
                         ["rbd", "rm", f"{pool}/temp-clone-{timestamp}-{image}"],
@@ -354,3 +388,134 @@ def cleanup(namespace_volume_meta, timestamp, unique_pools):
                 # doesnt logger.info anything on success
             except subprocess.CalledProcessError as e:
                 logger.warning(e.stdout + e.stderr)
+
+
+
+# openebs zfs localpv backup
+async def zfs_snap_and_send(namespace_volume_meta, timestamp, k8s_stack, backup_addr, pkey):
+    logger.info("snap and sending zfs")
+
+    stack_apex = ".".join(k8s_stack.split(".")[1:])
+
+    for namespace, volume_meta in namespace_volume_meta.items():
+        namespace_node = volume_meta[0]["required_affinity"].node_selector_terms[0].match_expressions[0].values[0] # check that only a single node contains all the pvs in the namespace
+        logger.info(f"collecting metas for ns: {namespace}, node: {namespace_node}")
+
+        datasets_to_snap = []
+
+        for meta in volume_meta:
+            meta_node = meta["required_affinity"].node_selector_terms[0].match_expressions[0].values[0]
+            meta_fstype = meta['csi_spec'].fs_type
+
+            if meta_node != namespace_node:
+                raise RuntimeError(f"Found different node zfs local pvs for the same namespace {meta_node} / {namespace_node}")
+
+            if meta_fstype != "ext4":
+                raise RuntimeError(f"Only support zvol pvcs with ext4 filesystem type (no zfs dataset snapshots as they are not convertible to ceph rbd)!")
+
+            datasets_to_snap.append(f"{meta['csi_spec'].volume_attributes['openebs.io/poolname']}/{meta['pv_name']}")
+
+
+        async with asyncssh.connect(
+                namespace_node + "." + stack_apex,
+                username="admin",
+                client_keys=["/opt/id_qemu"],
+                known_hosts=None
+        ) as ssh:
+            cmd = "sudo zfs snapshot " + " ".join(f"{dss}@{timestamp}" for dss in datasets_to_snap)
+            logger.debug("executing: %s", cmd)
+
+            await ssh.run(cmd, check=True)
+
+            # backup the zvol through converting it to a raw disk image
+            for meta in volume_meta:
+                zpool = meta['csi_spec'].volume_attributes['openebs.io/poolname']
+                # first we need to mount the snapshot
+                zvol_mount = f"{zpool}/{meta['pv_name']}-{timestamp}-export"
+
+                cmd = f"sudo zfs clone {zpool}/{meta['pv_name']}@{timestamp} {zvol_mount}"
+                logger.debug("executing: %s", cmd)
+
+                await ssh.run(cmd, check=True)
+
+                # then we use qemu-img to export and upload
+                request_dict = {
+                    "borg_archive_type": "k8s",
+                    "archive_name": meta["pv_name"],
+                    "timestamp": timestamp,
+                    "stdin_name": meta["pv_name"] + ".raw",
+                    "namespace": meta["namespace"],
+                }
+                logger.info(request_dict)
+
+
+                async def chunk_generator():
+                    cmd = f"sudo dd if=/dev/zvol/{zvol_mount} bs=4M status=none | zstd -1 -T4 --stdout"
+                    logger.debug("executing: %s", cmd)
+
+                    proc = await ssh.create_process(cmd, encoding=None)
+
+                    while True:
+                        chunk = await proc.stdout.read(
+                            40 * 1024 * 1024  # 40 MiB
+                        )
+
+                        if not chunk:
+                            break
+
+                        yield chunk
+
+                    await proc.wait()
+
+                    logger.info(
+                        "dd exit code %s",
+                        proc.exit_status
+                    )
+
+                await net.archive_async(
+                    backup_addr,
+                    request_dict,
+                    chunk_generator,
+                    compress=False
+                )
+
+
+
+def cleanup_zfs(namespace_volume_meta, timestamp, k8s_stack, pkey):
+    stack_apex = ".".join(k8s_stack.split(".")[1:])
+
+    if namespace_volume_meta is not None:
+        for volume_meta in namespace_volume_meta.values():
+            namespace_node = volume_meta[0]["required_affinity"].node_selector_terms[0].match_expressions[0].values[0]
+
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+            logger.info(f"connecting to {namespace_node}.{stack_apex}")
+
+            try:
+                ssh.connect(namespace_node + "." + stack_apex, username="admin", pkey=pkey)
+
+                for meta in volume_meta:
+                    zpool = meta['csi_spec'].volume_attributes['openebs.io/poolname']
+
+                    # delete zpool clones
+                    logger.info(f"running: sudo zfs destroy {zpool}/{meta['pv_name']}-{timestamp}-export")
+                    _, stdout, _ = ssh.exec_command(f"sudo zfs destroy {zpool}/{meta['pv_name']}-{timestamp}-export")
+
+                    logger.info(
+                        "zfs clone destroy exit code: %s",
+                        stdout.channel.recv_exit_status()
+                    )
+
+                    # delete snapshots
+                    logger.info(f"running: sudo zfs destroy {zpool}/{meta['pv_name']}@{timestamp}")
+                    _, stdout, _ = ssh.exec_command(f"sudo zfs destroy {zpool}/{meta['pv_name']}@{timestamp}")
+
+                    logger.info(
+                        "zfs destroy snapshot exit code: %s",
+                        stdout.channel.recv_exit_status()
+                    )
+
+            finally:
+                ssh.close()

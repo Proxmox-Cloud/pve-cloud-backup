@@ -56,7 +56,7 @@ async def send_cchunk(writer, compressed_chunk):
         await writer.drain()
 
 
-async def archive_async(backup_addr, request_dict, chunk_generator):
+async def archive_async(backup_addr, request_dict, chunk_generator, compress=True):
     logger.info(request_dict)
     reader, writer = await asyncio.open_connection(
         backup_addr, 8085, ssl=get_strict_client_ssl_ctx()
@@ -66,13 +66,20 @@ async def archive_async(backup_addr, request_dict, chunk_generator):
 
     # initialize the synchronous generator and start reading chunks, compress and send
     # compressor = zlib.compressobj(level=1)
-    compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
-    async for chunk in chunk_generator():
-        await send_cchunk(writer, compressor.compress(chunk))
+    if compress:
+        compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
+        async for chunk in chunk_generator():
+            await send_cchunk(writer, compressor.compress(chunk))
+        # send rest in compressor, compress doesnt always return a byte array, see bdd.py doc
+        # send size first again
+        await send_cchunk(writer, compressor.flush())
 
-    # send rest in compressor, compress doesnt always return a byte array, see bdd.py doc
-    # send size first again
-    await send_cchunk(writer, compressor.flush())
+    else:
+        async for chunk in chunk_generator():
+            writer.write(struct.pack("!I", len(chunk)))
+            await writer.drain()
+            writer.write(chunk)
+            await writer.drain()
 
     # send eof to server, signal that we are done
     logger.debug("sending eof")

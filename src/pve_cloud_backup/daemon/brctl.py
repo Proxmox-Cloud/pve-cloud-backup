@@ -217,6 +217,10 @@ async def launch_restore_job(args):
                 ).encode()
             ).decode(),
         ),
+        V1EnvVar(
+            name="LOG_LEVEL",
+            value=args.log_level
+        ),
     ]
 
     container = V1Container(
@@ -237,9 +241,16 @@ async def launch_restore_job(args):
                 mount_path="/etc/pve/priv/ceph.client.admin.keyring",
                 sub_path="ceph-admin-keyring",
             ),
+            V1VolumeMount(
+                name="fetcher-secrets",
+                mount_path="/opt/id_qemu",
+                sub_path="qemu-id"
+            )
         ],
     )
 
+    # todo: conditionally load ceph config and check restore type, zfs restores should work without
+    # and only need ssh key / host info
     template = V1PodTemplateSpec(
         metadata=V1ObjectMeta(labels={"job": f"pxc-restore-{args.timestamp}"}),
         spec=V1PodSpec(
@@ -254,6 +265,11 @@ async def launch_restore_job(args):
                     name="ceph-secrets",
                     secret=V1SecretVolumeSource(secret_name="ceph-secrets"),
                 ),
+                # todo: should be made more specific
+                V1Volume(
+                    name="fetcher-secrets",
+                    secret=V1SecretVolumeSource(secret_name="fetcher-secrets")
+                )
             ],
         ),
     )
@@ -313,7 +329,7 @@ def get_parser():
 
     k8s_restore_parser = subparsers.add_parser(
         "restore-k8s",
-        help="Restore k8s csi backups. If pvcs with same name exist, test-restore will be appended to pvc name.",
+        help="Restore pxc k8s csi backups (zfs/ceph origin) into ceph storage class backed pvcs. If pvcs with same name exist, test-restore will be appended to pvc name.",
         parents=[base_parser],
     )
     k8s_restore_parser.add_argument(
@@ -364,6 +380,12 @@ def get_parser():
         type=str,
         help="Custom image for launching restore job (e2e test arg).",
     )
+
+    k8s_restore_parser.add_argument(
+        "--log-level",
+        default="INFO"
+    )
+
     k8s_restore_parser.set_defaults(func=launch_restore_job)
 
     base_dir_parser = subparsers.add_parser(

@@ -10,11 +10,14 @@ import struct
 import subprocess
 import time
 import uuid
+import paramiko
+import asyncssh
 from pprint import pformat
 
 import zstandard as zstd
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
+from kubernetes.utils.quantity import parse_quantity
 from tinydb import Query, TinyDB
 
 from pve_cloud_backup.daemon.rpc import Command
@@ -46,9 +49,7 @@ def convert_keys_to_camel_case(obj):
         return obj
 
 
-async def procedure():
-    restore_args = json.loads(base64.b64decode(os.getenv("PXC_RESTORE_ARGS")))
-    logger.info(restore_args)
+async def init_procedure_bdd(restore_args):
 
     # connect to the backup server and start the restore procedure
     # we simply trust the host here as the ca is only available from
@@ -95,18 +96,71 @@ async def procedure():
         base64.b64decode(stack_meta["namespace_secret_dict_b64"])
     )
 
+    return reader, writer, metas_grouped_by_ns, namespace_secret_dict
+
+
+def clean_pvc_dict(pvc_dict):
+    # clean the old pvc object so it can be submitted freshly
+    pvc_dict["metadata"]["annotations"].pop(
+        "pv.kubernetes.io/bind-completed", None
+    )
+    pvc_dict["metadata"]["annotations"].pop(
+        "pv.kubernetes.io/bound-by-controller", None
+    )
+    pvc_dict["metadata"].pop("finalizers", None)
+    pvc_dict["metadata"].pop("managed_fields", None)
+    pvc_dict["metadata"].pop("resource_version", None)
+    pvc_dict["metadata"].pop("uid", None)
+    pvc_dict["metadata"].pop("creation_timestamp", None)
+    pvc_dict.pop("status", None)
+    pvc_dict.pop("kind", None)
+    pvc_dict.pop("api_version", None)
+
+
+def clean_pv_dict(pv_dict):
+    # cleanup the old pv aswell for recreation
+    pv_dict.pop("api_version", None)
+    pv_dict.pop("kind", None)
+    pv_dict["metadata"].pop("creation_timestamp", None)
+    pv_dict["metadata"].pop("finalizers", None)
+    pv_dict["metadata"].pop("managed_fields", None)
+    pv_dict["metadata"].pop("resource_version", None)
+    pv_dict["metadata"]["annotations"].pop(
+        "volume.kubernetes.io/provisioner-deletion-secret-name", None
+    )
+    pv_dict["metadata"]["annotations"].pop(
+        "volume.kubernetes.io/provisioner-deletion-secret-namespace", None
+    )
+    pv_dict.pop("status", None)
+    pv_dict["spec"].pop("claim_ref", None)
+    pv_dict["spec"].pop("volume_attributes_class_name", None)
+    pv_dict["spec"].pop("scale_io", None)
+    pv_dict["spec"]["csi"].pop("volume_handle", None)
+    pv_dict["spec"]["csi"]["volume_attributes"].pop("imageName", None)
+    pv_dict["spec"]["csi"]["volume_attributes"].pop("journalPool", None)
+    pv_dict["spec"]["csi"]["volume_attributes"].pop("pool", None)
+
+
+async def procedure():
+    restore_args = json.loads(base64.b64decode(os.getenv("PXC_RESTORE_ARGS")))
+    logger.info(restore_args)
+
+    reader, writer, metas_grouped_by_ns, namespace_secret_dict = await init_procedure_bdd(restore_args)
+
     # now we start the restore procedure
     config.load_incluster_config()
     core_v1 = client.CoreV1Api()
     apps_v1 = client.AppsV1Api()
     storage_v1 = client.StorageV1Api()
+    custom_api = client.CustomObjectsApi()
 
-    # get ceph storage classes
-    ceph_storage_classes = {
+    # get ceph and zfs storage classes
+    cluster_storage_classes = {
         sc.metadata.name: sc
         for sc in storage_v1.list_storage_class().items
-        if sc.provisioner == "rbd.csi.ceph.com"
+        if sc.provisioner in ["rbd.csi.ceph.com", "zfs.csi.openebs.io"]
     }
+    # zfs zpool can be read directly from the storageclass
 
     # load existing ceph pools and fetch their ids, needed for later pv restoring
     ls_call = subprocess.run(
@@ -314,189 +368,306 @@ async def procedure():
                         )
                         break
 
-            new_csi_image_name = f"csi-vol-{uuid.uuid4()}"
+            old_provisioner = pv_dict["spec"]["csi"]["driver"]
+            target_provisioner = cluster_storage_classes[storage_class].provisioner
 
-            # send to the bdd server what we want to request
-            request_archive = f"borg-{type}/{orig_namespace}\n"
-            request_artifact = f"{image_name}_{restore_args['timestamp']}\n"
+            if old_provisioner != target_provisioner:
+                raise NotImplementedError("Cross provider restore not yet implemented!")
 
-            logger.info(
-                f"requesting borg archive stream from bdd {request_archive} - {request_artifact} into rbd import {pool}/{new_csi_image_name}"
-            )
+            if target_provisioner == "zfs.csi.openebs.io":
+                # todo: pick better target node for restoring / make configurable
+                target_restore_zfs_node = cluster_storage_classes[storage_class].allowed_topologies[0].match_label_expressions[0].values[0]
+                logger.debug(f"restoring zfs to node {target_restore_zfs_node}")
 
-            # bdd server does readline()
-            writer.write(request_archive.encode())
-            await writer.drain()
+                # get the nodes ip via kubeapi
+                node = core_v1.read_node(name=target_restore_zfs_node)
 
-            writer.write(request_artifact.encode())
-            await writer.drain()
-
-            # pipe the resulting stream into rbd import
-            rbd_import_proc = await asyncio.create_subprocess_exec(
-                "rbd",
-                "import",
-                "-",
-                f"{pool}/{new_csi_image_name}",
-                stdin=asyncio.subprocess.PIPE,
-            )
-
-            # read compressed chunks
-            decompressor = zstd.ZstdDecompressor().decompressobj()
-            while True:
-                # client first always sends chunk size
-                chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-                if chunk_size == 0:
-                    break  # client sends 0 chunk size at the end to signal that its finished uploading
-                chunk = await reader.readexactly(chunk_size)
-
-                # decompress and write
-                decompressed_chunk = decompressor.decompress(chunk)
-                if decompressed_chunk:
-                    rbd_import_proc.stdin.write(decompressed_chunk)
-                    await rbd_import_proc.stdin.drain()
-
-            # the decompressor does not always return a decompressed chunk but might retain
-            # and return empty. at the end we need to call flush to get everything out
-            rbd_import_proc.stdin.write(decompressor.flush())
-            await rbd_import_proc.stdin.drain()
-
-            # close the proc stdin pipe, writer gets closed in finally
-            rbd_import_proc.stdin.close()
-            exit_code = await rbd_import_proc.wait()
-
-            if exit_code != 0:
-                raise Exception(f"Rbd import failed with code {exit_code}")
-
-            # restore from pickled pvc dicts
-            new_pv_name = f"pvc-{uuid.uuid4()}"
-
-            logger.debug(
-                f"restoring pv with new pv name {new_pv_name} and csi image name {new_csi_image_name}"
-            )
-
-            # create the new pvc based on the old - remove dynamic fields of old:
-            if pvc_dict["metadata"]["name"] in existing_pvcs:
-                pvc_name = pvc_dict["metadata"]["name"]
-                pvc_dict["metadata"]["name"] = f"test-restore-{pvc_name}"
-                logger.info(
-                    f"pvc {pvc_name} exists, creating it with test-restore- prefix"
+                internal_ip = next(
+                    addr.address
+                    for addr in node.status.addresses
+                    if addr.type == "InternalIP"
                 )
 
-            # clean the old pvc object so it can be submitted freshly
-            pvc_dict["metadata"]["annotations"].pop(
-                "pv.kubernetes.io/bind-completed", None
-            )
-            pvc_dict["metadata"]["annotations"].pop(
-                "pv.kubernetes.io/bound-by-controller", None
-            )
-            pvc_dict["metadata"].pop("finalizers", None)
-            pvc_dict["metadata"].pop("managed_fields", None)
-            pvc_dict["metadata"].pop("resource_version", None)
-            pvc_dict["metadata"].pop("uid", None)
-            pvc_dict["metadata"].pop("creation_timestamp", None)
-            pvc_dict.pop("status", None)
-            pvc_dict.pop("kind", None)
-            pvc_dict.pop("api_version", None)
+                async with asyncssh.connect(
+                        internal_ip,
+                        username="admin",
+                        client_keys=["/opt/id_qemu"],
+                        known_hosts=None
+                ) as ssh:
+                    restore_pvc_uuid = str(uuid.uuid4())
+                    # first we create a zvol of identical size
+                    # todo: remove -rest stub and replace with new id generation
+                    # todo: write converter function to create zvol in exact size like k8s did zfs list -t volume -o name,volsize
+                    cmd = f"sudo zfs create -s -V {parse_quantity(pvc_dict['spec']['resources']['requests']['storage'])} tank-pv/pvc-{restore_pvc_uuid}"
+                    logger.info("Executing create: %s", cmd)
 
-            # set new values
-            pvc_dict["spec"]["storage_class_name"] = storage_class
-            pvc_dict["metadata"]["namespace"] = restore_namespace
+                    await ssh.run(cmd, check=True)
 
-            # we can give it a customized pv name so we know migrated ones - will still behave like a normal created pv
-            pvc_dict["spec"]["volume_name"] = new_pv_name
+                    # then we pipe the compressed stream into dd zstd decompression pipeline
+                    proc = await ssh.create_process(f"zstd --decompress --stdout | sudo dd of=/dev/zvol/tank-pv/pvc-{restore_pvc_uuid} bs=4M status=none", encoding=None)
 
-            # creation call
-            logger.debug(f"creating new pvc:\n{pformat(pvc_dict)}")
-            core_v1.create_namespaced_persistent_volume_claim(
-                namespace=restore_namespace,
-                body=client.V1PersistentVolumeClaim(
-                    **convert_keys_to_camel_case(pvc_dict)
-                ),
-            )
+                    # send to the bdd server what we want to request
+                    request_archive = f"borg-{type}/{orig_namespace}\n"
+                    request_artifact = f"{image_name}_{restore_args['timestamp']}\n"
+                    logger.info(
+                        f"requesting borg archive stream from bdd {request_archive} - {request_artifact} into dd zvol import {pool}/pvc-{restore_pvc_uuid}"
+                    )
 
-            # cleanup the old pv aswell for recreation
-            pv_dict.pop("api_version", None)
-            pv_dict.pop("kind", None)
-            pv_dict["metadata"].pop("creation_timestamp", None)
-            pv_dict["metadata"].pop("finalizers", None)
-            pv_dict["metadata"].pop("managed_fields", None)
-            pv_dict["metadata"].pop("resource_version", None)
-            pv_dict["metadata"]["annotations"].pop(
-                "volume.kubernetes.io/provisioner-deletion-secret-name", None
-            )
-            pv_dict["metadata"]["annotations"].pop(
-                "volume.kubernetes.io/provisioner-deletion-secret-namespace", None
-            )
-            pv_dict.pop("status", None)
-            pv_dict["spec"].pop("claim_ref", None)
-            pv_dict["spec"].pop("volume_attributes_class_name", None)
-            pv_dict["spec"].pop("scale_io", None)
-            pv_dict["spec"]["csi"].pop("volume_handle", None)
-            pv_dict["spec"]["csi"]["volume_attributes"].pop("imageName", None)
-            pv_dict["spec"]["csi"]["volume_attributes"].pop("journalPool", None)
-            pv_dict["spec"]["csi"]["volume_attributes"].pop("pool", None)
+                    # bdd server does readline()
+                    writer.write(request_archive.encode())
+                    await writer.drain()
 
-            # set values
+                    writer.write(request_artifact.encode())
+                    await writer.drain()
+                    logger.info("send request artifact / archive")
 
-            # get the storage class and set secrets from it
-            ceph_storage_class = ceph_storage_classes[storage_class]
-            pv_dict["metadata"]["annotations"][
-                "volume.kubernetes.io/provisioner-deletion-secret-name"
-            ] = ceph_storage_class.parameters[
-                "csi.storage.k8s.io/provisioner-secret-name"
-            ]
-            pv_dict["metadata"]["annotations"][
-                "volume.kubernetes.io/provisioner-deletion-secret-namespace"
-            ] = ceph_storage_class.parameters[
-                "csi.storage.k8s.io/provisioner-secret-namespace"
-            ]
+                    # read compressed chunks
+                    while True:
+                        # client first always sends chunk size
+                        chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+                        if chunk_size == 0:
+                            logger.debug("received eof")
+                            break  # client sends 0 chunk size at the end to signal that its finished uploading
 
-            pv_dict["spec"]["csi"]["node_stage_secret_ref"]["name"] = (
-                ceph_storage_class.parameters[
-                    "csi.storage.k8s.io/node-stage-secret-name"
+                        chunk = await reader.readexactly(chunk_size)
+
+                        proc.stdin.write(chunk)
+                        await proc.stdin.drain()
+
+                    logger.info("done reading closing proc")
+                    proc.stdin.close()
+                    await proc.wait()
+
+                    logger.info(
+                        "dd exit code %s",
+                        proc.exit_status
+                    )
+
+                    if proc.exit_status != 0:
+                        raise Exception(f"DD zvol import failed with code {proc.exit_status}")
+
+                    # create the new pvc based on the old - remove dynamic fields of old:
+                    if pvc_dict["metadata"]["name"] in existing_pvcs:
+                        pvc_name = pvc_dict["metadata"]["name"]
+                        pvc_dict["metadata"]["name"] = f"test-restore-{pvc_name}"
+                        logger.info(
+                            f"pvc {pvc_name} exists, creating it with test-restore- prefix"
+                        )
+
+                    clean_pvc_dict(pvc_dict)
+
+                    # set new values
+                    new_pv_name = f"pvc-{restore_pvc_uuid}"
+                    pvc_dict["spec"]["storage_class_name"] = storage_class
+                    pvc_dict["metadata"]["namespace"] = restore_namespace
+
+                    # we can give it a customized pv name so we know migrated ones - will still behave like a normal created pv
+                    pvc_dict["spec"]["volume_name"] = new_pv_name
+
+                    # creation call
+                    logger.debug(f"creating new pvc:\n{pformat(pvc_dict)}")
+                    core_v1.create_namespaced_persistent_volume_claim(
+                        namespace=restore_namespace,
+                        body=client.V1PersistentVolumeClaim(
+                            **convert_keys_to_camel_case(pvc_dict)
+                        ),
+                    )
+
+                    clean_pv_dict(pv_dict)
+
+                    # update claimRef - same as pv name for openebs
+                    pv_dict["spec"]["csi"]["volume_handle"] = new_pv_name
+
+                    # set the node we restored to
+                    pv_dict["spec"]["node_affinity"]["required"]["node_selector_terms"][0]["match_expressions"][0]["values"] = [
+                        target_restore_zfs_node
+                    ]
+
+                    pv_dict["spec"]["storage_class_name"] = storage_class
+
+                    pv_dict["metadata"]["name"] = new_pv_name
+
+                    logger.debug(f"creating new pv:\n{pformat(pv_dict)}")
+                    core_v1.create_persistent_volume(
+                        body=client.V1PersistentVolume(**convert_keys_to_camel_case(pv_dict))
+                    )
+
+                    # openebs zfs also has a custom resource for zvols that needs to be created
+                    custom_api.create_namespaced_custom_object(
+                        group="zfs.openebs.io",
+                        version="v1",
+                        namespace="openebs",
+                        plural="zfsvolumes",
+                        body={
+                            "apiVersion": "zfs.openebs.io/v1",
+                            "kind": "ZFSVolume",
+                            "metadata": {
+                                "name": new_pv_name,
+                                "namespace": "openebs",
+                                "labels": {
+                                    "kubernetes.io/nodename": target_restore_zfs_node
+                                },
+                            },
+                            "spec": {
+                                "capacity": str(parse_quantity(pvc_dict['spec']['resources']['requests']['storage'])),
+                                "fsType": "ext4",
+                                "ownerNodeID": target_restore_zfs_node,
+                                "poolName": "tank-pv",
+                                "quotaType": "quota",
+                                "volumeType": "ZVOL",
+                            },
+                        }
+                    )
+
+            elif target_provisioner == "rbd.csi.ceph.com":
+
+                new_csi_image_name = f"csi-vol-{uuid.uuid4()}"
+
+                # send to the bdd server what we want to request
+                request_archive = f"borg-{type}/{orig_namespace}\n"
+                request_artifact = f"{image_name}_{restore_args['timestamp']}\n"
+
+                logger.info(
+                    f"requesting borg archive stream from bdd {request_archive} - {request_artifact} into rbd import {pool}/{new_csi_image_name}"
+                )
+
+                # bdd server does readline()
+                writer.write(request_archive.encode())
+                await writer.drain()
+
+                writer.write(request_artifact.encode())
+                await writer.drain()
+
+                # pipe the resulting stream into rbd import
+                rbd_import_proc = await asyncio.create_subprocess_exec(
+                    "rbd",
+                    "import",
+                    "-",
+                    f"{pool}/{new_csi_image_name}",
+                    stdin=asyncio.subprocess.PIPE,
+                )
+
+                # read compressed chunks
+                decompressor = zstd.ZstdDecompressor().decompressobj()
+                while True:
+                    # client first always sends chunk size
+                    chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+                    if chunk_size == 0:
+                        break  # client sends 0 chunk size at the end to signal that its finished uploading
+                    chunk = await reader.readexactly(chunk_size)
+
+                    # decompress and write
+                    decompressed_chunk = decompressor.decompress(chunk)
+                    if decompressed_chunk:
+                        rbd_import_proc.stdin.write(decompressed_chunk)
+                        await rbd_import_proc.stdin.drain()
+
+                # the decompressor does not always return a decompressed chunk but might retain
+                # and return empty. at the end we need to call flush to get everything out
+                rbd_import_proc.stdin.write(decompressor.flush())
+                await rbd_import_proc.stdin.drain()
+
+                # close the proc stdin pipe, writer gets closed in finally
+                rbd_import_proc.stdin.close()
+                exit_code = await rbd_import_proc.wait()
+
+                if exit_code != 0:
+                    raise Exception(f"Rbd import failed with code {exit_code}")
+
+                # restore from pickled pvc dicts
+                new_pv_name = f"pvc-{uuid.uuid4()}"
+
+                logger.debug(
+                    f"restoring pv with new pv name {new_pv_name} and csi image name {new_csi_image_name}"
+                )
+
+                # create the new pvc based on the old - remove dynamic fields of old:
+                if pvc_dict["metadata"]["name"] in existing_pvcs:
+                    pvc_name = pvc_dict["metadata"]["name"]
+                    pvc_dict["metadata"]["name"] = f"test-restore-{pvc_name}"
+                    logger.info(
+                        f"pvc {pvc_name} exists, creating it with test-restore- prefix"
+                    )
+
+                clean_pvc_dict(pvc_dict)
+
+                # set new values
+                pvc_dict["spec"]["storage_class_name"] = storage_class
+                pvc_dict["metadata"]["namespace"] = restore_namespace
+
+                # we can give it a customized pv name so we know migrated ones - will still behave like a normal created pv
+                pvc_dict["spec"]["volume_name"] = new_pv_name
+
+                # creation call
+                logger.debug(f"creating new pvc:\n{pformat(pvc_dict)}")
+                core_v1.create_namespaced_persistent_volume_claim(
+                    namespace=restore_namespace,
+                    body=client.V1PersistentVolumeClaim(
+                        **convert_keys_to_camel_case(pvc_dict)
+                    ),
+                )
+
+                clean_pv_dict(pv_dict)
+
+                # get the storage class and set secrets from it
+                ceph_storage_class = cluster_storage_classes[storage_class]
+                pv_dict["metadata"]["annotations"][
+                    "volume.kubernetes.io/provisioner-deletion-secret-name"
+                ] = ceph_storage_class.parameters[
+                    "csi.storage.k8s.io/provisioner-secret-name"
                 ]
-            )
-            pv_dict["spec"]["csi"]["node_stage_secret_ref"]["namespace"] = (
-                ceph_storage_class.parameters[
-                    "csi.storage.k8s.io/node-stage-secret-namespace"
+                pv_dict["metadata"]["annotations"][
+                    "volume.kubernetes.io/provisioner-deletion-secret-namespace"
+                ] = ceph_storage_class.parameters[
+                    "csi.storage.k8s.io/provisioner-secret-namespace"
                 ]
-            )
 
-            pv_dict["spec"]["csi"]["controller_expand_secret_ref"]["name"] = (
-                ceph_storage_class.parameters[
-                    "csi.storage.k8s.io/controller-expand-secret-name"
-                ]
-            )
-            pv_dict["spec"]["csi"]["controller_expand_secret_ref"]["namespace"] = (
-                ceph_storage_class.parameters[
-                    "csi.storage.k8s.io/controller-expand-secret-namespace"
-                ]
-            )
+                pv_dict["spec"]["csi"]["node_stage_secret_ref"]["name"] = (
+                    ceph_storage_class.parameters[
+                        "csi.storage.k8s.io/node-stage-secret-name"
+                    ]
+                )
+                pv_dict["spec"]["csi"]["node_stage_secret_ref"]["namespace"] = (
+                    ceph_storage_class.parameters[
+                        "csi.storage.k8s.io/node-stage-secret-namespace"
+                    ]
+                )
 
-            pv_dict["spec"]["csi"]["volume_attributes"]["clusterID"] = ceph_cluster_id
+                pv_dict["spec"]["csi"]["controller_expand_secret_ref"]["name"] = (
+                    ceph_storage_class.parameters[
+                        "csi.storage.k8s.io/controller-expand-secret-name"
+                    ]
+                )
+                pv_dict["spec"]["csi"]["controller_expand_secret_ref"]["namespace"] = (
+                    ceph_storage_class.parameters[
+                        "csi.storage.k8s.io/controller-expand-secret-namespace"
+                    ]
+                )
 
-            # reconstruction of volume handle that the ceph csi provisioner understands
-            pool_id = format(pool_name_id[pool], "016x")
-            trimmed_new_csi_image_name = new_csi_image_name.removeprefix("csi-vol-")
-            pv_dict["spec"]["csi"][
-                "volumeHandle"
-            ] = f"0001-0024-{ceph_cluster_id}-{pool_id}-{trimmed_new_csi_image_name}"
+                pv_dict["spec"]["csi"]["volume_attributes"]["clusterID"] = ceph_cluster_id
 
-            pv_dict["spec"]["csi"]["volume_attributes"][
-                "imageName"
-            ] = new_csi_image_name
-            pv_dict["spec"]["csi"]["volume_attributes"]["journalPool"] = pool
-            pv_dict["spec"]["csi"]["volume_attributes"]["pool"] = pool
+                # reconstruction of volume handle that the ceph csi provisioner understands
+                pool_id = format(pool_name_id[pool], "016x")
+                trimmed_new_csi_image_name = new_csi_image_name.removeprefix("csi-vol-")
+                pv_dict["spec"]["csi"][
+                    "volumeHandle"
+                ] = f"0001-0024-{ceph_cluster_id}-{pool_id}-{trimmed_new_csi_image_name}"
 
-            pv_dict["spec"]["storage_class_name"] = storage_class
+                pv_dict["spec"]["csi"]["volume_attributes"][
+                    "imageName"
+                ] = new_csi_image_name
+                pv_dict["spec"]["csi"]["volume_attributes"]["journalPool"] = pool
+                pv_dict["spec"]["csi"]["volume_attributes"]["pool"] = pool
 
-            pv_dict["metadata"]["name"] = new_pv_name
+                pv_dict["spec"]["storage_class_name"] = storage_class
 
-            # creation call
-            logger.debug(f"creating new pv:\n{pformat(pv_dict)}")
-            core_v1.create_persistent_volume(
-                body=client.V1PersistentVolume(**convert_keys_to_camel_case(pv_dict))
-            )
+                pv_dict["metadata"]["name"] = new_pv_name
+
+                # creation call
+                logger.debug(f"creating new pv:\n{pformat(pv_dict)}")
+                core_v1.create_persistent_volume(
+                    body=client.V1PersistentVolume(**convert_keys_to_camel_case(pv_dict))
+                )
 
         # send the done signal to bdd server
         writer.write("##BRCTL-DONE\n".encode())

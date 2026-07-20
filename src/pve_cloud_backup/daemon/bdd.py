@@ -253,6 +253,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     backup_dir = f"{get_backup_base_dir()}/{request_archive}"
 
                     async with get_lock(backup_dir):
+                        logger.info(f"running borg extract on {backup_dir}::{request_artifact}")
                         proc = await asyncio.create_subprocess_exec(
                             "borg",
                             "extract",

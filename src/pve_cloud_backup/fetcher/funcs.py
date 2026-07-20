@@ -4,9 +4,9 @@ import json
 import logging
 import os
 import pickle
-import asyncssh
 import subprocess
 
+import asyncssh
 import paramiko
 import yaml
 from kubernetes import client, config
@@ -45,7 +45,9 @@ def collect_k8s_meta(backup_config, provisioner):
 
         pvc_list = v1.list_namespaced_persistent_volume_claim(namespace=namespace)
 
-        namespace_driver = None # check flag => backup currently only supports homogeneus namespaces
+        namespace_driver = (
+            None  # check flag => backup currently only supports homogeneus namespaces
+        )
         for pvc in pvc_list.items:
             pvc_name = pvc.metadata.name
             volume_name = pvc.spec.volume_name
@@ -58,13 +60,17 @@ def collect_k8s_meta(backup_config, provisioner):
 
                 # make sure no mixed drivers in backup ns
                 if pv.spec.csi.driver != namespace_driver:
-                    raise RuntimeError(f"Backup tool currently doesnt supported mixed csi driver namespaces: {namespace_driver} + {pv.spec.csi.driver} found!")
+                    raise RuntimeError(
+                        f"Backup tool currently doesnt supported mixed csi driver namespaces: {namespace_driver} + {pv.spec.csi.driver} found!"
+                    )
 
                 if pv.spec.csi.driver not in SUPPORTED_PROVISIONERS:
-                    raise ValueError(f"Backup for unsupported provisioner on {namespace} {pvc_name}")
+                    raise ValueError(
+                        f"Backup for unsupported provisioner on {namespace} {pvc_name}"
+                    )
 
                 if pv.spec.csi.driver != provisioner:
-                    continue # skip not targeted vols
+                    continue  # skip not targeted vols
 
                 pv_dict_b64 = base64.b64encode(pickle.dumps(pv.to_dict())).decode(
                     "utf-8"
@@ -75,15 +81,15 @@ def collect_k8s_meta(backup_config, provisioner):
                 )
 
                 meta = {
-                        "namespace": namespace,
-                        "pvc_name": pvc_name,
-                        "pv_name": pv.metadata.name,
-                        "namespace": namespace,
-                        "csi_spec": pv.spec.csi,
-                        "pvc_dict_b64": pvc_dict_b64,
-                        "pv_dict_b64": pv_dict_b64,
-                        "storage_class": pvc.spec.storage_class_name
-                    }
+                    "namespace": namespace,
+                    "pvc_name": pvc_name,
+                    "pv_name": pv.metadata.name,
+                    "namespace": namespace,
+                    "csi_spec": pv.spec.csi,
+                    "pvc_dict_b64": pvc_dict_b64,
+                    "pv_dict_b64": pv_dict_b64,
+                    "storage_class": pvc.spec.storage_class_name,
+                }
 
                 if pv.spec.node_affinity and pv.spec.node_affinity.required:
                     meta["required_affinity"] = pv.spec.node_affinity.required
@@ -92,11 +98,13 @@ def collect_k8s_meta(backup_config, provisioner):
             else:
                 logger.debug(f"PVC: {pvc_name} -> Not bound to a PV [Status: {status}]")
 
-        if volume_meta: # only set on content
+        if volume_meta:  # only set on content
             namespace_volume_meta[namespace] = volume_meta
         else:
             # remove fetched secrets
-            logger.debug(f"No secrets found for provisioner {provisioner} removing namespace {namespace} secrets")
+            logger.debug(
+                f"No secrets found for provisioner {provisioner} removing namespace {namespace} secrets"
+            )
             namespace_secrets.pop(namespace)
 
     return namespace_secrets, namespace_volume_meta
@@ -299,10 +307,10 @@ async def post_volume_meta(namespace_volume_meta, timestamp, k8s_stack, backup_a
         for meta in volume_meta:
             pool = None
             image = None
-            if meta['csi_spec'].driver == "rbd.csi.ceph.com":
+            if meta["csi_spec"].driver == "rbd.csi.ceph.com":
                 pool = meta["csi_spec"].volume_attributes["pool"]
                 image = meta["csi_spec"].volume_attributes["imageName"]
-            elif meta['csi_spec'].driver == "zfs.csi.openebs.io":
+            elif meta["csi_spec"].driver == "zfs.csi.openebs.io":
                 pool = meta["csi_spec"].volume_attributes["openebs.io/poolname"]
                 image = meta["pv_name"]
             else:
@@ -390,50 +398,70 @@ def cleanup(namespace_volume_meta, timestamp, unique_pools):
                 logger.warning(e.stdout + e.stderr)
 
 
-
 # openebs zfs localpv backup
-async def zfs_snap_and_send(namespace_volume_meta, timestamp, k8s_stack, backup_addr, pkey):
+async def zfs_snap_and_send(
+    namespace_volume_meta, timestamp, k8s_stack, backup_addr, pkey
+):
     logger.info("snap and sending zfs")
 
     stack_apex = ".".join(k8s_stack.split(".")[1:])
 
     for namespace, volume_meta in namespace_volume_meta.items():
-        namespace_node = volume_meta[0]["required_affinity"].node_selector_terms[0].match_expressions[0].values[0] # check that only a single node contains all the pvs in the namespace
+        namespace_node = (
+            volume_meta[0]["required_affinity"]
+            .node_selector_terms[0]
+            .match_expressions[0]
+            .values[0]
+        )  # check that only a single node contains all the pvs in the namespace
         logger.info(f"collecting metas for ns: {namespace}, node: {namespace_node}")
 
         datasets_to_snap = []
 
         for meta in volume_meta:
-            meta_node = meta["required_affinity"].node_selector_terms[0].match_expressions[0].values[0]
-            meta_fstype = meta['csi_spec'].fs_type
+            meta_node = (
+                meta["required_affinity"]
+                .node_selector_terms[0]
+                .match_expressions[0]
+                .values[0]
+            )
+            meta_fstype = meta["csi_spec"].fs_type
 
             if meta_node != namespace_node:
-                raise RuntimeError(f"Found different node zfs local pvs for the same namespace {meta_node} / {namespace_node}")
+                raise RuntimeError(
+                    f"Found different node zfs local pvs for the same namespace {meta_node} / {namespace_node}"
+                )
 
             if meta_fstype != "ext4":
-                raise RuntimeError(f"Only support zvol pvcs with ext4 filesystem type (no zfs dataset snapshots as they are not convertible to ceph rbd)!")
+                raise RuntimeError(
+                    f"Only support zvol pvcs with ext4 filesystem type (no zfs dataset snapshots as they are not convertible to ceph rbd)!"
+                )
 
-            datasets_to_snap.append(f"{meta['csi_spec'].volume_attributes['openebs.io/poolname']}/{meta['pv_name']}")
-
+            datasets_to_snap.append(
+                f"{meta['csi_spec'].volume_attributes['openebs.io/poolname']}/{meta['pv_name']}"
+            )
 
         async with asyncssh.connect(
-                namespace_node + "." + stack_apex,
-                username="admin",
-                client_keys=["/opt/id_qemu"],
-                known_hosts=None
+            namespace_node + "." + stack_apex,
+            username="admin",
+            client_keys=["/opt/id_qemu"],
+            known_hosts=None,
         ) as ssh:
-            cmd = "sudo zfs snapshot " + " ".join(f"{dss}@{timestamp}" for dss in datasets_to_snap)
+            cmd = "sudo zfs snapshot " + " ".join(
+                f"{dss}@{timestamp}" for dss in datasets_to_snap
+            )
             logger.debug("executing: %s", cmd)
 
             await ssh.run(cmd, check=True)
 
             # backup the zvol through converting it to a raw disk image
             for meta in volume_meta:
-                zpool = meta['csi_spec'].volume_attributes['openebs.io/poolname']
+                zpool = meta["csi_spec"].volume_attributes["openebs.io/poolname"]
                 # first we need to mount the snapshot
                 zvol_mount = f"{zpool}/{meta['pv_name']}-{timestamp}-export"
 
-                cmd = f"sudo zfs clone {zpool}/{meta['pv_name']}@{timestamp} {zvol_mount}"
+                cmd = (
+                    f"sudo zfs clone {zpool}/{meta['pv_name']}@{timestamp} {zvol_mount}"
+                )
                 logger.debug("executing: %s", cmd)
 
                 await ssh.run(cmd, check=True)
@@ -448,7 +476,6 @@ async def zfs_snap_and_send(namespace_volume_meta, timestamp, k8s_stack, backup_
                 }
                 logger.info(request_dict)
 
-
                 async def chunk_generator():
                     cmd = f"sudo dd if=/dev/zvol/{zvol_mount} bs=4M status=none | zstd -1 -T4 --stdout"
                     logger.debug("executing: %s", cmd)
@@ -456,9 +483,7 @@ async def zfs_snap_and_send(namespace_volume_meta, timestamp, k8s_stack, backup_
                     proc = await ssh.create_process(cmd, encoding=None)
 
                     while True:
-                        chunk = await proc.stdout.read(
-                            40 * 1024 * 1024  # 40 MiB
-                        )
+                        chunk = await proc.stdout.read(40 * 1024 * 1024)  # 40 MiB
 
                         if not chunk:
                             break
@@ -467,18 +492,11 @@ async def zfs_snap_and_send(namespace_volume_meta, timestamp, k8s_stack, backup_
 
                     await proc.wait()
 
-                    logger.info(
-                        "dd exit code %s",
-                        proc.exit_status
-                    )
+                    logger.info("dd exit code %s", proc.exit_status)
 
                 await net.archive_async(
-                    backup_addr,
-                    request_dict,
-                    chunk_generator,
-                    compress=False
+                    backup_addr, request_dict, chunk_generator, compress=False
                 )
-
 
 
 def cleanup_zfs(namespace_volume_meta, timestamp, k8s_stack, pkey):
@@ -486,7 +504,12 @@ def cleanup_zfs(namespace_volume_meta, timestamp, k8s_stack, pkey):
 
     if namespace_volume_meta is not None:
         for volume_meta in namespace_volume_meta.values():
-            namespace_node = volume_meta[0]["required_affinity"].node_selector_terms[0].match_expressions[0].values[0]
+            namespace_node = (
+                volume_meta[0]["required_affinity"]
+                .node_selector_terms[0]
+                .match_expressions[0]
+                .values[0]
+            )
 
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -494,27 +517,37 @@ def cleanup_zfs(namespace_volume_meta, timestamp, k8s_stack, pkey):
             logger.info(f"connecting to {namespace_node}.{stack_apex}")
 
             try:
-                ssh.connect(namespace_node + "." + stack_apex, username="admin", pkey=pkey)
+                ssh.connect(
+                    namespace_node + "." + stack_apex, username="admin", pkey=pkey
+                )
 
                 for meta in volume_meta:
-                    zpool = meta['csi_spec'].volume_attributes['openebs.io/poolname']
+                    zpool = meta["csi_spec"].volume_attributes["openebs.io/poolname"]
 
                     # delete zpool clones
-                    logger.info(f"running: sudo zfs destroy {zpool}/{meta['pv_name']}-{timestamp}-export")
-                    _, stdout, _ = ssh.exec_command(f"sudo zfs destroy {zpool}/{meta['pv_name']}-{timestamp}-export")
+                    logger.info(
+                        f"running: sudo zfs destroy {zpool}/{meta['pv_name']}-{timestamp}-export"
+                    )
+                    _, stdout, _ = ssh.exec_command(
+                        f"sudo zfs destroy {zpool}/{meta['pv_name']}-{timestamp}-export"
+                    )
 
                     logger.info(
                         "zfs clone destroy exit code: %s",
-                        stdout.channel.recv_exit_status()
+                        stdout.channel.recv_exit_status(),
                     )
 
                     # delete snapshots
-                    logger.info(f"running: sudo zfs destroy {zpool}/{meta['pv_name']}@{timestamp}")
-                    _, stdout, _ = ssh.exec_command(f"sudo zfs destroy {zpool}/{meta['pv_name']}@{timestamp}")
+                    logger.info(
+                        f"running: sudo zfs destroy {zpool}/{meta['pv_name']}@{timestamp}"
+                    )
+                    _, stdout, _ = ssh.exec_command(
+                        f"sudo zfs destroy {zpool}/{meta['pv_name']}@{timestamp}"
+                    )
 
                     logger.info(
                         "zfs destroy snapshot exit code: %s",
-                        stdout.channel.recv_exit_status()
+                        stdout.channel.recv_exit_status(),
                     )
 
             finally:

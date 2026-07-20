@@ -68,7 +68,9 @@ async def run():
     unique_pools = None
 
     try:
-        namespace_secrets, namespace_volume_meta = funcs.collect_k8s_meta(backup_config, provisioner="rbd.csi.ceph.com")
+        namespace_secrets, namespace_volume_meta = funcs.collect_k8s_meta(
+            backup_config, provisioner="rbd.csi.ceph.com"
+        )
         logger.debug(f"volume_meta:\n{pformat(namespace_volume_meta)}")
 
         # this simply adds all the images to groups inside of ceph
@@ -79,24 +81,42 @@ async def run():
         await funcs.send_backups(namespace_volume_meta, timestamp, backup_addr)
 
         # backup zfs
-        namespace_secrets_zfs, namespace_volume_meta_zfs = funcs.collect_k8s_meta(backup_config, provisioner="zfs.csi.openebs.io")
+        namespace_secrets_zfs, namespace_volume_meta_zfs = funcs.collect_k8s_meta(
+            backup_config, provisioner="zfs.csi.openebs.io"
+        )
         logger.debug(f"volume_meta zfs:\n{pformat(namespace_volume_meta)}")
 
-        await funcs.zfs_snap_and_send(namespace_volume_meta_zfs, timestamp, backup_config["k8s_stack"], backup_addr, paramiko.Ed25519Key.from_private_key_file("/opt/id_qemu"))
+        await funcs.zfs_snap_and_send(
+            namespace_volume_meta_zfs,
+            timestamp,
+            backup_config["k8s_stack"],
+            backup_addr,
+            paramiko.Ed25519Key.from_private_key_file("/opt/id_qemu"),
+        )
 
         # merge metas and secrets for single db entry on server side
         await funcs.post_volume_meta(
-            namespace_volume_meta | namespace_volume_meta_zfs, timestamp, backup_config["k8s_stack"], backup_addr
+            namespace_volume_meta | namespace_volume_meta_zfs,
+            timestamp,
+            backup_config["k8s_stack"],
+            backup_addr,
         )
         await funcs.post_k8s_namespace_secrets(
-            namespace_secrets | namespace_secrets_zfs, timestamp, backup_config["k8s_stack"], backup_addr
+            namespace_secrets | namespace_secrets_zfs,
+            timestamp,
+            backup_config["k8s_stack"],
+            backup_addr,
         )
 
     finally:
         # we always want to do the cleanup even if something failed
         funcs.cleanup(namespace_volume_meta, timestamp, unique_pools)
-        funcs.cleanup_zfs(namespace_volume_meta_zfs, timestamp, backup_config["k8s_stack"], paramiko.Ed25519Key.from_private_key_file("/opt/id_qemu"))
-
+        funcs.cleanup_zfs(
+            namespace_volume_meta_zfs,
+            timestamp,
+            backup_config["k8s_stack"],
+            paramiko.Ed25519Key.from_private_key_file("/opt/id_qemu"),
+        )
 
 
 def main():

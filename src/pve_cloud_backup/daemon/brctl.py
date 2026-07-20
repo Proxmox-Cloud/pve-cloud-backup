@@ -217,10 +217,7 @@ async def launch_restore_job(args):
                 ).encode()
             ).decode(),
         ),
-        V1EnvVar(
-            name="LOG_LEVEL",
-            value=args.log_level
-        ),
+        V1EnvVar(name="LOG_LEVEL", value=args.log_level),
     ]
 
     container = V1Container(
@@ -242,10 +239,8 @@ async def launch_restore_job(args):
                 sub_path="ceph-admin-keyring",
             ),
             V1VolumeMount(
-                name="fetcher-secrets",
-                mount_path="/opt/id_qemu",
-                sub_path="qemu-id"
-            )
+                name="fetcher-secrets", mount_path="/opt/id_qemu", sub_path="qemu-id"
+            ),
         ],
     )
 
@@ -268,8 +263,8 @@ async def launch_restore_job(args):
                 # todo: should be made more specific
                 V1Volume(
                     name="fetcher-secrets",
-                    secret=V1SecretVolumeSource(secret_name="fetcher-secrets")
-                )
+                    secret=V1SecretVolumeSource(secret_name="fetcher-secrets"),
+                ),
             ],
         ),
     )
@@ -381,10 +376,7 @@ def get_parser():
         help="Custom image for launching restore job (e2e test arg).",
     )
 
-    k8s_restore_parser.add_argument(
-        "--log-level",
-        default="INFO"
-    )
+    k8s_restore_parser.add_argument("--log-level", default="INFO")
 
     k8s_restore_parser.set_defaults(func=launch_restore_job)
 

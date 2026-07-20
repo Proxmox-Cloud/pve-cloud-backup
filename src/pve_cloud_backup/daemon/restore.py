@@ -10,10 +10,10 @@ import struct
 import subprocess
 import time
 import uuid
-import paramiko
-import asyncssh
 from pprint import pformat
 
+import asyncssh
+import paramiko
 import zstandard as zstd
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -101,9 +101,7 @@ async def init_procedure_bdd(restore_args):
 
 def clean_pvc_dict(pvc_dict):
     # clean the old pvc object so it can be submitted freshly
-    pvc_dict["metadata"]["annotations"].pop(
-        "pv.kubernetes.io/bind-completed", None
-    )
+    pvc_dict["metadata"]["annotations"].pop("pv.kubernetes.io/bind-completed", None)
     pvc_dict["metadata"]["annotations"].pop(
         "pv.kubernetes.io/bound-by-controller", None
     )
@@ -145,7 +143,9 @@ async def procedure():
     restore_args = json.loads(base64.b64decode(os.getenv("PXC_RESTORE_ARGS")))
     logger.info(restore_args)
 
-    reader, writer, metas_grouped_by_ns, namespace_secret_dict = await init_procedure_bdd(restore_args)
+    reader, writer, metas_grouped_by_ns, namespace_secret_dict = (
+        await init_procedure_bdd(restore_args)
+    )
 
     # now we start the restore procedure
     config.load_incluster_config()
@@ -376,7 +376,12 @@ async def procedure():
 
             if target_provisioner == "zfs.csi.openebs.io":
                 # todo: pick better target node for restoring / make configurable
-                target_restore_zfs_node = cluster_storage_classes[storage_class].allowed_topologies[0].match_label_expressions[0].values[0]
+                target_restore_zfs_node = (
+                    cluster_storage_classes[storage_class]
+                    .allowed_topologies[0]
+                    .match_label_expressions[0]
+                    .values[0]
+                )
                 logger.debug(f"restoring zfs to node {target_restore_zfs_node}")
 
                 # get the nodes ip via kubeapi
@@ -389,10 +394,10 @@ async def procedure():
                 )
 
                 async with asyncssh.connect(
-                        internal_ip,
-                        username="admin",
-                        client_keys=["/opt/id_qemu"],
-                        known_hosts=None
+                    internal_ip,
+                    username="admin",
+                    client_keys=["/opt/id_qemu"],
+                    known_hosts=None,
                 ) as ssh:
                     restore_pvc_uuid = str(uuid.uuid4())
                     # first we create a zvol of identical size
@@ -404,7 +409,10 @@ async def procedure():
                     await ssh.run(cmd, check=True)
 
                     # then we pipe the compressed stream into dd zstd decompression pipeline
-                    proc = await ssh.create_process(f"zstd --decompress --stdout | sudo dd of=/dev/zvol/tank-pv/pvc-{restore_pvc_uuid} bs=4M status=none", encoding=None)
+                    proc = await ssh.create_process(
+                        f"zstd --decompress --stdout | sudo dd of=/dev/zvol/tank-pv/pvc-{restore_pvc_uuid} bs=4M status=none",
+                        encoding=None,
+                    )
 
                     # send to the bdd server what we want to request
                     request_archive = f"borg-{type}/{orig_namespace}\n"
@@ -424,7 +432,9 @@ async def procedure():
                     # read compressed chunks
                     while True:
                         # client first always sends chunk size
-                        chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+                        chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[
+                            0
+                        ]
                         if chunk_size == 0:
                             logger.debug("received eof")
                             break  # client sends 0 chunk size at the end to signal that its finished uploading
@@ -438,13 +448,12 @@ async def procedure():
                     proc.stdin.close()
                     await proc.wait()
 
-                    logger.info(
-                        "dd exit code %s",
-                        proc.exit_status
-                    )
+                    logger.info("dd exit code %s", proc.exit_status)
 
                     if proc.exit_status != 0:
-                        raise Exception(f"DD zvol import failed with code {proc.exit_status}")
+                        raise Exception(
+                            f"DD zvol import failed with code {proc.exit_status}"
+                        )
 
                     # create the new pvc based on the old - remove dynamic fields of old:
                     if pvc_dict["metadata"]["name"] in existing_pvcs:
@@ -479,9 +488,9 @@ async def procedure():
                     pv_dict["spec"]["csi"]["volume_handle"] = new_pv_name
 
                     # set the node we restored to
-                    pv_dict["spec"]["node_affinity"]["required"]["node_selector_terms"][0]["match_expressions"][0]["values"] = [
-                        target_restore_zfs_node
-                    ]
+                    pv_dict["spec"]["node_affinity"]["required"]["node_selector_terms"][
+                        0
+                    ]["match_expressions"][0]["values"] = [target_restore_zfs_node]
 
                     pv_dict["spec"]["storage_class_name"] = storage_class
 
@@ -489,7 +498,9 @@ async def procedure():
 
                     logger.debug(f"creating new pv:\n{pformat(pv_dict)}")
                     core_v1.create_persistent_volume(
-                        body=client.V1PersistentVolume(**convert_keys_to_camel_case(pv_dict))
+                        body=client.V1PersistentVolume(
+                            **convert_keys_to_camel_case(pv_dict)
+                        )
                     )
 
                     # openebs zfs also has a custom resource for zvols that needs to be created
@@ -509,14 +520,20 @@ async def procedure():
                                 },
                             },
                             "spec": {
-                                "capacity": str(parse_quantity(pvc_dict['spec']['resources']['requests']['storage'])),
+                                "capacity": str(
+                                    parse_quantity(
+                                        pvc_dict["spec"]["resources"]["requests"][
+                                            "storage"
+                                        ]
+                                    )
+                                ),
                                 "fsType": "ext4",
                                 "ownerNodeID": target_restore_zfs_node,
                                 "poolName": "tank-pv",
                                 "quotaType": "quota",
                                 "volumeType": "ZVOL",
                             },
-                        }
+                        },
                     )
 
             elif target_provisioner == "rbd.csi.ceph.com":
@@ -644,7 +661,9 @@ async def procedure():
                     ]
                 )
 
-                pv_dict["spec"]["csi"]["volume_attributes"]["clusterID"] = ceph_cluster_id
+                pv_dict["spec"]["csi"]["volume_attributes"][
+                    "clusterID"
+                ] = ceph_cluster_id
 
                 # reconstruction of volume handle that the ceph csi provisioner understands
                 pool_id = format(pool_name_id[pool], "016x")
@@ -666,7 +685,9 @@ async def procedure():
                 # creation call
                 logger.debug(f"creating new pv:\n{pformat(pv_dict)}")
                 core_v1.create_persistent_volume(
-                    body=client.V1PersistentVolume(**convert_keys_to_camel_case(pv_dict))
+                    body=client.V1PersistentVolume(
+                        **convert_keys_to_camel_case(pv_dict)
+                    )
                 )
 
         # send the done signal to bdd server

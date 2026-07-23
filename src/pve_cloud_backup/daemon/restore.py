@@ -162,34 +162,44 @@ async def procedure():
     }
     # zfs zpool can be read directly from the storageclass
 
+    ceph_csi_present = any(sc.provisioner == "rbd.csi.ceph.com" for sc in cluster_storage_classes.values())
+    zfs_csi_present = any(sc.provisioner == "zfs.csi.openebs.io" for sc in cluster_storage_classes.values())
+
     # load existing ceph pools and fetch their ids, needed for later pv restoring
-    ls_call = subprocess.run(
-        ["ceph", "osd", "pool", "ls", "detail", "-f", "json"],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    pool_details = json.loads(
-        ls_call.stdout
-    )  # load existing ceph pools and fetch their ids, needed for later pv restoring
+    ceph_pool_name_id = None
+    ceph_cluster_id = None
 
-    pool_name_id = {}
-    for pool_detail in pool_details:
-        pool_name_id[pool_detail["pool_name"]] = pool_detail["pool_id"]
+    # todo: this should be handled further up the chain, the modules shouldnt
+    # even provide credentials for ceph access if no ceph csi is present in
+    # the cluster
+    if ceph_csi_present:
+        ls_call = subprocess.run(
+            ["ceph", "osd", "pool", "ls", "detail", "-f", "json"],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        pool_details = json.loads(
+            ls_call.stdout
+        )  # load existing ceph pools and fetch their ids, needed for later pv restoring
 
-    # get the cluster id from ceph ns
-    ceph_csi_config = core_v1.read_namespaced_config_map(
-        name="ceph-csi-config", namespace="ceph-csi"
-    )
+        ceph_pool_name_id = {}
+        for pool_detail in pool_details:
+            ceph_pool_name_id[pool_detail["pool_name"]] = pool_detail["pool_id"]
 
-    if not ceph_csi_config:
-        raise Exception(
-            "Could not find ceph-csi-config config map in ceph-csi namespace"
+        # get the cluster id from ceph ns
+        ceph_csi_config = core_v1.read_namespaced_config_map(
+            name="ceph-csi-config", namespace="ceph-csi"
         )
 
-    ceph_cluster_id = json.loads(ceph_csi_config.data.get("config.json"))[0][
-        "clusterID"
-    ]
+        if not ceph_csi_config:
+            raise Exception(
+                "Could not find ceph-csi-config config map in ceph-csi namespace"
+            )
+
+        ceph_cluster_id = json.loads(ceph_csi_config.data.get("config.json"))[0][
+            "clusterID"
+        ]
 
     filter_namespaces = (
         []
@@ -666,7 +676,7 @@ async def procedure():
                 ] = ceph_cluster_id
 
                 # reconstruction of volume handle that the ceph csi provisioner understands
-                pool_id = format(pool_name_id[pool], "016x")
+                pool_id = format(ceph_pool_name_id[pool], "016x")
                 trimmed_new_csi_image_name = new_csi_image_name.removeprefix("csi-vol-")
                 pv_dict["spec"]["csi"][
                     "volumeHandle"

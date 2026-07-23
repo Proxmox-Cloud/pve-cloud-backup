@@ -162,8 +162,13 @@ async def procedure():
     }
     # zfs zpool can be read directly from the storageclass
 
-    ceph_csi_present = any(sc.provisioner == "rbd.csi.ceph.com" for sc in cluster_storage_classes.values())
-    zfs_csi_present = any(sc.provisioner == "zfs.csi.openebs.io" for sc in cluster_storage_classes.values())
+    ceph_csi_present = any(
+        sc.provisioner == "rbd.csi.ceph.com" for sc in cluster_storage_classes.values()
+    )
+    zfs_csi_present = any(
+        sc.provisioner == "zfs.csi.openebs.io"
+        for sc in cluster_storage_classes.values()
+    )
 
     # load existing ceph pools and fetch their ids, needed for later pv restoring
     ceph_pool_name_id = None

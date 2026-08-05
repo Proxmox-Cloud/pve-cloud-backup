@@ -11,10 +11,10 @@ import struct
 
 import yaml
 from kubernetes import client
-from kubernetes.client import (ApiException, V1ConfigMapVolumeSource, V1Container, V1EnvVar,
-                               V1Job, V1JobSpec, V1ObjectMeta, V1PodSpec,
-                               V1PodTemplateSpec, V1SecretVolumeSource,
-                               V1Volume, V1VolumeMount)
+from kubernetes.client import (ApiException, V1ConfigMapVolumeSource,
+                               V1Container, V1EnvVar, V1Job, V1JobSpec,
+                               V1ObjectMeta, V1PodSpec, V1PodTemplateSpec,
+                               V1SecretVolumeSource, V1Volume, V1VolumeMount)
 from kubernetes.config.kube_config import KubeConfigLoader
 from pve_cloud.cli.pvclu import (get_cloud_domain, get_ssh_master_kubeconfig,
                                  get_ssh_remote_master_kubeconfig)
@@ -236,18 +236,20 @@ async def launch_restore_job(args):
     ]
 
     if ceph_secrets_available:
-        volume_mounts.extend([
-            V1VolumeMount(
-                name="ceph-config",
-                mount_path="/etc/ceph/ceph.conf",
-                sub_path="ceph.conf",
-            ),
-            V1VolumeMount(
-                name="ceph-secrets",
-                mount_path="/etc/pve/priv/ceph.client.admin.keyring",
-                sub_path="ceph-admin-keyring",
-            ),
-        ])
+        volume_mounts.extend(
+            [
+                V1VolumeMount(
+                    name="ceph-config",
+                    mount_path="/etc/ceph/ceph.conf",
+                    sub_path="ceph.conf",
+                ),
+                V1VolumeMount(
+                    name="ceph-secrets",
+                    mount_path="/etc/pve/priv/ceph.client.admin.keyring",
+                    sub_path="ceph-admin-keyring",
+                ),
+            ]
+        )
 
     container = V1Container(
         name="pxc-restore",
@@ -267,7 +269,8 @@ async def launch_restore_job(args):
     ]
 
     if ceph_secrets_available:
-        volumes.extend([
+        volumes.extend(
+            [
                 V1Volume(
                     name="ceph-config",
                     config_map=V1ConfigMapVolumeSource(name="ceph-config"),
@@ -276,7 +279,8 @@ async def launch_restore_job(args):
                     name="ceph-secrets",
                     secret=V1SecretVolumeSource(secret_name="ceph-secrets"),
                 ),
-        ])
+            ]
+        )
 
     # todo: conditionally load ceph config and check restore type, zfs restores should work without
     # and only need ssh key / host info
@@ -285,7 +289,7 @@ async def launch_restore_job(args):
         spec=V1PodSpec(
             restart_policy="Never",
             containers=[container],
-            volumes=volumes # todo: should be more specific
+            volumes=volumes,  # todo: should be more specific
         ),
     )
 
@@ -368,7 +372,7 @@ def get_parser():
     k8s_restore_parser.add_argument(
         "--sc-mapping",
         action="append",
-        help="Map a storage classe in the backup to one in the target cluster, for example \"csi-rbd-sc-ssd:openebs-zfspv-zvol\". Can be provided multiple times.",
+        help='Map a storage classe in the backup to one in the target cluster, for example "csi-rbd-sc-ssd:openebs-zfspv-zvol". Can be provided multiple times.',
     )
     k8s_restore_parser.add_argument(
         "--namespace-mapping",

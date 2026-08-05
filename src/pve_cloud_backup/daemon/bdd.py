@@ -225,7 +225,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                     Meta = Query()
                     ns_secrets = secret_db.get(
-                        (Meta.timestamp == timestamp) # timestamp is our unique id for the backup
+                        (
+                            Meta.timestamp == timestamp
+                        )  # timestamp is our unique id for the backup
                     )
 
                     meta_pickled = pickle.dumps(ns_secrets)

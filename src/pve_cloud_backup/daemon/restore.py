@@ -80,14 +80,6 @@ async def init_procedure_bdd(restore_args):
 
         metas_grouped_by_ns[meta["namespace"]].append(meta)
 
-    # query the server for backup secrets
-    writer.write(
-        (
-            restore_args["stack_name"] + "." + restore_args["cloud_domain"] + "\n"
-        ).encode()
-    )
-    await writer.drain()
-
     # read the the meta information
     dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
     stack_meta = pickle.loads((await reader.readexactly(dict_size)))
@@ -105,6 +97,8 @@ def clean_pvc_dict(pvc_dict):
     pvc_dict["metadata"]["annotations"].pop(
         "pv.kubernetes.io/bound-by-controller", None
     )
+    pvc_dict["metadata"]["annotations"].pop("volume.beta.kubernetes.io/storage-provisioner", None)
+    pvc_dict["metadata"]["annotations"].pop("volume.kubernetes.io/storage-provisioner", None)
     pvc_dict["metadata"].pop("finalizers", None)
     pvc_dict["metadata"].pop("managed_fields", None)
     pvc_dict["metadata"].pop("resource_version", None)
@@ -129,14 +123,26 @@ def clean_pv_dict(pv_dict):
     pv_dict["metadata"]["annotations"].pop(
         "volume.kubernetes.io/provisioner-deletion-secret-namespace", None
     )
+    pv_dict["metadata"]["annotations"].pop("pv.kubernetes.io/provisioned-by", None)
+
     pv_dict.pop("status", None)
+    pv_dict["spec"].pop("node_affinity", None)
     pv_dict["spec"].pop("claim_ref", None)
     pv_dict["spec"].pop("volume_attributes_class_name", None)
     pv_dict["spec"].pop("scale_io", None)
+    pv_dict["spec"].pop("storage_class_name", None)
+    pv_dict["spec"]["csi"].pop("driver", None)
     pv_dict["spec"]["csi"].pop("volume_handle", None)
-    pv_dict["spec"]["csi"]["volume_attributes"].pop("imageName", None)
-    pv_dict["spec"]["csi"]["volume_attributes"].pop("journalPool", None)
-    pv_dict["spec"]["csi"]["volume_attributes"].pop("pool", None)
+    pv_dict["spec"]["csi"].pop("node_stage_secret_ref", None)
+    pv_dict["spec"]["csi"].pop("controller_expand_secret_ref", None)
+
+    # save the original provisioner
+    orig_prov = pv_dict["spec"]["csi"]["volume_attributes"]["storage.kubernetes.io/csiProvisionerIdentity"]
+
+    pv_dict["spec"]["csi"].pop("volume_attributes")
+    pv_dict["spec"]["csi"]["volume_attributes"] = {
+        "storage.kubernetes.io/csiProvisionerIdentity": orig_prov # carry it forward
+    }
 
 
 async def procedure():
@@ -371,23 +377,33 @@ async def procedure():
             pool = meta["pool"]
             storage_class = pvc_dict["spec"]["storage_class_name"]
 
-            if restore_args["pool_sc_mapping"]:
-                for pool_mapping in restore_args["pool_sc_mapping"]:
-                    old_pool = pool_mapping.split(":")[0]
-                    new_pool_sc = pool_mapping.split(":")[1]
-                    if pool == old_pool:
-                        pool = new_pool_sc.split("/")[0]
-                        storage_class = new_pool_sc.split("/")[1]
-                        logger.debug(
-                            f"new mapping specified old pool {old_pool}, new pool {pool}, new sc {storage_class}"
-                        )
-                        break
+            if restore_args["sc_mapping"]:
+                for sc_mapping in restore_args["sc_mapping"]:
+                    old_sc = sc_mapping.split(":")[0]
+                    new_sc = sc_mapping.split(":")[1]
+                    new_sc_k8s = cluster_storage_classes[new_sc]
+
+                    if storage_class == old_sc:
+                        # we found a volume that needs to be remapped / replaced
+                        if new_sc_k8s.provisioner == "zfs.csi.openebs.io":
+                            pool = new_sc_k8s.parameters["poolname"]
+                        elif new_sc_k8s.provisioner == "rbd.csi.ceph.com":
+                            pool = new_sc_k8s.parameters["pool"]
+                        else:
+                            raise RuntimeError(f"Storageclass mapping to unsupported provisioner {new_sc_k8s.provisioner}")
+
+                        storage_class = new_sc
+
 
             old_provisioner = pv_dict["spec"]["csi"]["driver"]
+
+            if storage_class not in cluster_storage_classes:
+                raise RuntimeError(f"Cannot perform restore, unknown storage class to cluster: {storage_class}")
+
             target_provisioner = cluster_storage_classes[storage_class].provisioner
 
             if old_provisioner != target_provisioner:
-                raise NotImplementedError("Cross provider restore not yet implemented!")
+                logger.info(f"Restoring cross csi storage classes: {old_provisioner} to {target_provisioner}")
 
             if target_provisioner == "zfs.csi.openebs.io":
                 # todo: pick better target node for restoring / make configurable
@@ -482,6 +498,8 @@ async def procedure():
 
                     # set new values
                     new_pv_name = f"pvc-{restore_pvc_uuid}"
+                    pvc_dict["metadata"]["annotations"]["volume.beta.kubernetes.io/storage-provisioner"] = target_provisioner
+                    pvc_dict["metadata"]["annotations"]["volume.kubernetes.io/storage-provisioner"] = target_provisioner
                     pvc_dict["spec"]["storage_class_name"] = storage_class
                     pvc_dict["metadata"]["namespace"] = restore_namespace
 
@@ -499,13 +517,31 @@ async def procedure():
 
                     clean_pv_dict(pv_dict)
 
+                    pv_dict["metadata"]["annotations"]["pv.kubernetes.io/provisioned-by"] = target_provisioner
+
+                    pv_dict["spec"]["csi"]["driver"] = target_provisioner
+
                     # update claimRef - same as pv name for openebs
                     pv_dict["spec"]["csi"]["volume_handle"] = new_pv_name
+                    pv_dict["spec"]["csi"]["volume_attributes"]["openebs.io/cas-type"] = "localpv-zfs"
+                    pv_dict["spec"]["csi"]["volume_attributes"]["openebs.io/poolname"] = pool
 
                     # set the node we restored to
-                    pv_dict["spec"]["node_affinity"]["required"]["node_selector_terms"][
-                        0
-                    ]["match_expressions"][0]["values"] = [target_restore_zfs_node]
+                    pv_dict["spec"]["node_affinity"] = {
+                        "required": {
+                            "node_selector_terms": [
+                                {
+                                    "match_expressions": [
+                                        {
+                                            "key": "openebs.io/nodeid",
+                                            "operator": "In",
+                                            "values": [target_restore_zfs_node]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
 
                     pv_dict["spec"]["storage_class_name"] = storage_class
 
@@ -624,6 +660,8 @@ async def procedure():
                 clean_pvc_dict(pvc_dict)
 
                 # set new values
+                pvc_dict["metadata"]["annotations"]["volume.beta.kubernetes.io/storage-provisioner"] = target_provisioner
+                pvc_dict["metadata"]["annotations"]["volume.kubernetes.io/storage-provisioner"] = target_provisioner
                 pvc_dict["spec"]["storage_class_name"] = storage_class
                 pvc_dict["metadata"]["namespace"] = restore_namespace
 
@@ -653,32 +691,28 @@ async def procedure():
                 ] = ceph_storage_class.parameters[
                     "csi.storage.k8s.io/provisioner-secret-namespace"
                 ]
+                pv_dict["metadata"]["annotations"]["pv.kubernetes.io/provisioned-by"] = target_provisioner
 
-                pv_dict["spec"]["csi"]["node_stage_secret_ref"]["name"] = (
-                    ceph_storage_class.parameters[
-                        "csi.storage.k8s.io/node-stage-secret-name"
-                    ]
-                )
-                pv_dict["spec"]["csi"]["node_stage_secret_ref"]["namespace"] = (
-                    ceph_storage_class.parameters[
-                        "csi.storage.k8s.io/node-stage-secret-namespace"
-                    ]
-                )
+                pv_dict["spec"]["csi"]["driver"] = target_provisioner
 
-                pv_dict["spec"]["csi"]["controller_expand_secret_ref"]["name"] = (
-                    ceph_storage_class.parameters[
-                        "csi.storage.k8s.io/controller-expand-secret-name"
-                    ]
-                )
-                pv_dict["spec"]["csi"]["controller_expand_secret_ref"]["namespace"] = (
-                    ceph_storage_class.parameters[
-                        "csi.storage.k8s.io/controller-expand-secret-namespace"
-                    ]
-                )
+                pv_dict["spec"]["csi"]["node_stage_secret_ref"] = {
+                    "name": ceph_storage_class.parameters["csi.storage.k8s.io/node-stage-secret-name"],
+                    "namespace": ceph_storage_class.parameters["csi.storage.k8s.io/node-stage-secret-namespace"]
+                }
+
+                pv_dict["spec"]["csi"]["controller_expand_secret_ref"] = {
+                    "name": ceph_storage_class.parameters["csi.storage.k8s.io/controller-expand-secret-name"],
+                    "namespace": ceph_storage_class.parameters["csi.storage.k8s.io/controller-expand-secret-namespace"],
+                }
+
 
                 pv_dict["spec"]["csi"]["volume_attributes"][
                     "clusterID"
                 ] = ceph_cluster_id
+
+                # insert purged attributes from target sc
+                if "imageFeatures" in ceph_storage_class.parameters:
+                    pv_dict["spec"]["csi"]["volume_attributes"]["imageFeatures"] = ceph_storage_class.parameters["imageFeatures"]
 
                 # reconstruction of volume handle that the ceph csi provisioner understands
                 pool_id = format(ceph_pool_name_id[pool], "016x")

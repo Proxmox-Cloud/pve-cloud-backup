@@ -11,7 +11,7 @@ import struct
 
 import yaml
 from kubernetes import client
-from kubernetes.client import (V1ConfigMapVolumeSource, V1Container, V1EnvVar,
+from kubernetes.client import (ApiException, V1ConfigMapVolumeSource, V1Container, V1EnvVar,
                                V1Job, V1JobSpec, V1ObjectMeta, V1PodSpec,
                                V1PodTemplateSpec, V1SecretVolumeSource,
                                V1Volume, V1VolumeMount)
@@ -174,8 +174,6 @@ async def launch_restore_job(args):
             "Jump host functionality requires external san to be set for the kubernetes cluster!"
         )
 
-    cloud_domain = get_cloud_domain(kubespray_inv["target_pve"])
-
     if jump_host:
         kubeconfig_dict = yaml.safe_load(
             get_ssh_remote_master_kubeconfig(
@@ -198,10 +196,21 @@ async def launch_restore_job(args):
     loader.load_and_set(configuration)
 
     api_instance = client.ApiClient(configuration)
+    core_v1 = client.CoreV1Api(api_instance)
     batch_v1 = client.BatchV1Api(api_instance)
 
     serializable_args = vars(args).copy()
     serializable_args["func"] = args.func.__name__
+
+    # check if ceph secrets exist
+    ceph_secrets_available = True
+    try:
+        core_v1.read_namespaced_secret("ceph-secrets", namespace="pve-cloud-backup")
+    except ApiException as e:
+        if e.status == 404:
+            ceph_secrets_available = False
+        else:
+            raise
 
     # env vars hold secrets for the job to run and auth
     env_vars = [
@@ -210,24 +219,24 @@ async def launch_restore_job(args):
             value=base64.b64encode(
                 json.dumps(
                     serializable_args
-                    | {
-                        "cloud_domain": cloud_domain,
-                        "stack_name": kubespray_inv["stack_name"],
-                    }
+                    # | {
+                    #     "cloud_domain": cloud_domain,
+                    #     "stack_name": kubespray_inv["stack_name"],
+                    # }
                 ).encode()
             ).decode(),
         ),
         V1EnvVar(name="LOG_LEVEL", value=args.log_level),
     ]
 
-    container = V1Container(
-        name="pxc-restore",
-        image=(
-            args.image if args.image else f"tobiashvmz/pve-cloud-backup:{bkp_version}"
-        ),  # args.image gets injected by e2e tests
-        args=["pxc-restore"],  # launch the job with our cli args as parameter
-        env=env_vars,
-        volume_mounts=[
+    volume_mounts = [
+        V1VolumeMount(
+            name="fetcher-secrets", mount_path="/opt/id_qemu", sub_path="qemu-id"
+        ),
+    ]
+
+    if ceph_secrets_available:
+        volume_mounts.extend([
             V1VolumeMount(
                 name="ceph-config",
                 mount_path="/etc/ceph/ceph.conf",
@@ -238,20 +247,27 @@ async def launch_restore_job(args):
                 mount_path="/etc/pve/priv/ceph.client.admin.keyring",
                 sub_path="ceph-admin-keyring",
             ),
-            V1VolumeMount(
-                name="fetcher-secrets", mount_path="/opt/id_qemu", sub_path="qemu-id"
-            ),
-        ],
+        ])
+
+    container = V1Container(
+        name="pxc-restore",
+        image=(
+            args.image if args.image else f"tobiashvmz/pve-cloud-backup:{bkp_version}"
+        ),  # args.image gets injected by e2e tests
+        args=["pxc-restore"],  # launch the job with our cli args as parameter
+        env=env_vars,
+        volume_mounts=volume_mounts,
     )
 
-    # todo: conditionally load ceph config and check restore type, zfs restores should work without
-    # and only need ssh key / host info
-    template = V1PodTemplateSpec(
-        metadata=V1ObjectMeta(labels={"job": f"pxc-restore-{args.timestamp}"}),
-        spec=V1PodSpec(
-            restart_policy="Never",
-            containers=[container],
-            volumes=[
+    volumes = [
+        V1Volume(
+            name="fetcher-secrets",
+            secret=V1SecretVolumeSource(secret_name="fetcher-secrets"),
+        ),
+    ]
+
+    if ceph_secrets_available:
+        volumes.extend([
                 V1Volume(
                     name="ceph-config",
                     config_map=V1ConfigMapVolumeSource(name="ceph-config"),
@@ -260,12 +276,16 @@ async def launch_restore_job(args):
                     name="ceph-secrets",
                     secret=V1SecretVolumeSource(secret_name="ceph-secrets"),
                 ),
-                # todo: should be made more specific
-                V1Volume(
-                    name="fetcher-secrets",
-                    secret=V1SecretVolumeSource(secret_name="fetcher-secrets"),
-                ),
-            ],
+        ])
+
+    # todo: conditionally load ceph config and check restore type, zfs restores should work without
+    # and only need ssh key / host info
+    template = V1PodTemplateSpec(
+        metadata=V1ObjectMeta(labels={"job": f"pxc-restore-{args.timestamp}"}),
+        spec=V1PodSpec(
+            restart_policy="Never",
+            containers=[container],
+            volumes=volumes # todo: should be more specific
         ),
     )
 
@@ -343,17 +363,17 @@ def get_parser():
         "--namespaces",
         type=str,
         default="",
-        help="Specific namespaces to restore, CSV, acts as a filter. Use with --pool-mapping for controlled migration of pvcs.",
+        help="Specific namespaces to restore, CSV, acts as a filter. Use with --sc-mapping for controlled migration of pvcs.",
     )
     k8s_restore_parser.add_argument(
-        "--pool-sc-mapping",
+        "--sc-mapping",
         action="append",
-        help="Define pool storage class mappings (old to new), for example old-pool:new-pool/new-storage-class-name.",
+        help="Map a storage classe in the backup to one in the target cluster, for example \"csi-rbd-sc-ssd:openebs-zfspv-zvol\". Can be provided multiple times.",
     )
     k8s_restore_parser.add_argument(
         "--namespace-mapping",
         action="append",
-        help="Namespaces that should be restored into new namespace names old-namespace:new-namespace.",
+        help="Namespace that should be restored into a new namespace names old-namespace:new-namespace. Can also be provided multiple times.",
     )
     k8s_restore_parser.add_argument(
         "--auto-scale",

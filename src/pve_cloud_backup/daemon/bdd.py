@@ -223,12 +223,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 async with get_lock(db_path):
                     secret_db = TinyDB(db_path)
 
-                    # listen for secret requests
-                    stack = (await reader.readline()).decode().rstrip("\n")
-
                     Meta = Query()
                     ns_secrets = secret_db.get(
-                        (Meta.timestamp == timestamp) & (Meta.stack == stack)
+                        (Meta.timestamp == timestamp) # timestamp is our unique id for the backup
                     )
 
                     meta_pickled = pickle.dumps(ns_secrets)

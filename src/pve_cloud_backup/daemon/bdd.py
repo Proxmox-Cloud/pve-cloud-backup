@@ -4,7 +4,6 @@ import os
 import pickle
 import ssl
 import struct
-import time
 
 import zstandard as zstd
 from tinydb import Query, TinyDB

@@ -20,8 +20,9 @@ from pve_cloud.cli.pvclu import (get_cloud_domain, get_ssh_master_kubeconfig,
                                  get_ssh_remote_master_kubeconfig)
 from pve_cloud.lib.inventory import (get_cluster_vars,
                                      get_online_pve_host_from_target_pve)
-from pve_cloud_backup._version import __version__ as bkp_version
 from pve_cloud.lib.ssh import connect_host
+from pve_cloud_backup._version import __version__ as bkp_version
+
 from pve_cloud_backup.daemon.funcs import get_backup_base_dir
 from pve_cloud_backup.daemon.rpc import Command
 
@@ -162,14 +163,22 @@ async def launch_restore_job(args):
     with open(args.inventory, "r") as file:
         raw_pxc_inv = yaml.safe_load(file)
 
-    if "plugin" not in raw_pxc_inv or raw_pxc_inv["plugin"] not in ["pxc.cloud.kubespray_inv", "pxc.cloud.ext_hosts_inv"]:
+    if "plugin" not in raw_pxc_inv or raw_pxc_inv["plugin"] not in [
+        "pxc.cloud.kubespray_inv",
+        "pxc.cloud.ext_hosts_inv",
+    ]:
         raise ValueError("Pxc incompatible inventory passed!")
 
     # todo: again this could be solved with a better generic schema handeling
     if raw_pxc_inv["plugin"] == "pxc.cloud.ext_hosts_inv":
         # validate that k0s_single host is there
-        if not "ungrouped" in raw_pxc_inv["host_groups"] and not "k0s_single" in raw_pxc_inv["host_groups"]["ungrouped"]:
-            raise ValueError("Unsuitable ext_hosts_inv passed! Needs ungrouped.k0s_single host.")
+        if (
+            not "ungrouped" in raw_pxc_inv["host_groups"]
+            and not "k0s_single" in raw_pxc_inv["host_groups"]["ungrouped"]
+        ):
+            raise ValueError(
+                "Unsuitable ext_hosts_inv passed! Needs ungrouped.k0s_single host."
+            )
 
     kubeconfig_dict = None
 
@@ -208,7 +217,7 @@ async def launch_restore_job(args):
             )
 
         # todo: maybe parameterize?
-        serializable_args["node_user"] = "admin" # default for kubespray
+        serializable_args["node_user"] = "admin"  # default for kubespray
         serializable_args["node_key_path"] = "/opt/id_qemu"
 
     elif raw_pxc_inv["plugin"] == "pxc.cloud.ext_hosts_inv":
@@ -224,12 +233,16 @@ async def launch_restore_job(args):
 
         k0s_single = raw_pxc_inv["host_groups"]["ungrouped"]["k0s_single"]
 
-        with connect_host(k0s_single["ansible_host"], user=k0s_single["ansible_user"]) as ssh:
+        with connect_host(
+            k0s_single["ansible_host"], user=k0s_single["ansible_user"]
+        ) as ssh:
             _, stdout, _ = ssh.exec_command("sudo k0s kubeconfig admin")
 
             kubeconfig_dict = yaml.safe_load(stdout.read().decode("utf-8"))
 
-        serializable_args["node_user"] = k0s_single["ansible_user"] # works with passwordless sudo
+        serializable_args["node_user"] = k0s_single[
+            "ansible_user"
+        ]  # works with passwordless sudo
         serializable_args["node_key_path"] = "/opt/id_ext"
 
     # init kube client for launching the restore job
@@ -240,7 +253,6 @@ async def launch_restore_job(args):
     api_instance = client.ApiClient(configuration)
     core_v1 = client.CoreV1Api(api_instance)
     batch_v1 = client.BatchV1Api(api_instance)
-
 
     # check if ceph secrets exist
     ceph_secrets_available = True

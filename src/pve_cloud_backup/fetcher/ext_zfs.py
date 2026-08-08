@@ -44,7 +44,7 @@ async def run():
             backup_config["k8s_stack"],
             backup_addr,
             paramiko.Ed25519Key.from_private_key_file("/opt/id_ext"),
-            pkey_path="/opt/id_ext"
+            pkey_path="/opt/id_ext",
         )
 
         # merge metas and secrets for single db entry on server side

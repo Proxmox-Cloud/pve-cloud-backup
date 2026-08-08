@@ -400,7 +400,12 @@ def cleanup(namespace_volume_meta, timestamp, unique_pools):
 
 # openebs zfs localpv backup
 async def zfs_snap_and_send(
-    namespace_volume_meta, timestamp, k8s_stack, backup_addr, pkey, pkey_path="/opt/id_qemu"
+    namespace_volume_meta,
+    timestamp,
+    k8s_stack,
+    backup_addr,
+    pkey,
+    pkey_path="/opt/id_qemu",
 ):
     logger.info("snap and sending zfs")
 
@@ -409,9 +414,7 @@ async def zfs_snap_and_send(
 
     node_ips = {
         node.metadata.name: next(
-            addr.address
-            for addr in node.status.addresses
-            if addr.type == "InternalIP"
+            addr.address for addr in node.status.addresses if addr.type == "InternalIP"
         )
         for node in v1.list_node().items
     }
@@ -426,7 +429,9 @@ async def zfs_snap_and_send(
 
         # collect internalip of node (we will connect via ssh to execute zfs commands)
 
-        logger.info(f"collecting metas for ns: {namespace}, node: {namespace_node}, ip: {node_ips[namespace_node]}")
+        logger.info(
+            f"collecting metas for ns: {namespace}, node: {namespace_node}, ip: {node_ips[namespace_node]}"
+        )
 
         datasets_to_snap = []
 
@@ -520,9 +525,7 @@ def cleanup_zfs(namespace_volume_meta, timestamp, k8s_stack, pkey):
 
     node_ips = {
         node.metadata.name: next(
-            addr.address
-            for addr in node.status.addresses
-            if addr.type == "InternalIP"
+            addr.address for addr in node.status.addresses if addr.type == "InternalIP"
         )
         for node in v1.list_node().items
     }
@@ -543,7 +546,9 @@ def cleanup_zfs(namespace_volume_meta, timestamp, k8s_stack, pkey):
 
             try:
                 ssh.connect(
-                    node_ips[namespace_node], username=os.getenv("QEMU_ADMIN_USER"), pkey=pkey
+                    node_ips[namespace_node],
+                    username=os.getenv("QEMU_ADMIN_USER"),
+                    pkey=pkey,
                 )
 
                 for meta in volume_meta:

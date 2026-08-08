@@ -1,4 +1,5 @@
 import asyncio
+
 import base64
 import fnmatch
 import json
@@ -166,7 +167,7 @@ async def procedure():
     storage_v1 = client.StorageV1Api()
     custom_api = client.CustomObjectsApi()
 
-    # get ceph and zfs storage classes
+    # Get ceph and zfs storage classes
     cluster_storage_classes = {
         sc.metadata.name: sc
         for sc in storage_v1.list_storage_class().items
@@ -437,8 +438,8 @@ async def procedure():
 
                 async with asyncssh.connect(
                     internal_ip,
-                    username="admin",
-                    client_keys=["/opt/id_qemu"],
+                    username=restore_args["node_user"],
+                    client_keys=[restore_args["node_key_path"]],
                     known_hosts=None,
                 ) as ssh:
                     restore_pvc_uuid = str(uuid.uuid4())

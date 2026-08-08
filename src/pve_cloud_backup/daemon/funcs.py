@@ -20,41 +20,7 @@ ENV = os.getenv("ENV", "TESTING")
 
 
 def get_backup_base_dir():
-    if os.getenv("PXC_REMOVABLE_DATASTORES"):
-        # logic for selecting any of the removables and writing there
-        datastore_cmd = subprocess.run(
-            ["proxmox-backup-manager", "datastore", "list", "--output-format", "json"],
-            stdout=subprocess.PIPE,
-            text=True,
-        )
-        datastores = json.loads(datastore_cmd.stdout)
-
-        target_datastores = os.getenv("PXC_REMOVABLE_DATASTORES").split(",")
-
-        # find the first datastore that matches env var
-        matching_online_datastore = None
-        for datastore in datastores:
-            if datastore["name"] in target_datastores:
-                result = subprocess.run(
-                    ["findmnt", f"/mnt/datastore/{datastore['name']}"],
-                    stdout=subprocess.PIPE,
-                    text=True,
-                )
-
-                # check if its mounted
-                if result.stdout.strip():
-                    matching_online_datastore = datastore
-                    break
-
-        if not matching_online_datastore:
-            raise Exception("Could not find matching datastore!")
-
-        return f"/mnt/datastore/{matching_online_datastore['name']}/pxc"
-    elif os.getenv("PXC_BACKUP_BASE_DIR"):
-        return os.getenv("PXC_BACKUP_BASE_DIR")
-    else:
-        raise FileNotFoundError("No env variables configured for any backup scenario!")
-
+    return "/mnt/bdd-zfs-data"
 
 def init_backup_dir(backup_dir):
     backup_base_dir = get_backup_base_dir()

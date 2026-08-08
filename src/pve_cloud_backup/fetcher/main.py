@@ -84,7 +84,7 @@ async def run():
         namespace_secrets_zfs, namespace_volume_meta_zfs = funcs.collect_k8s_meta(
             backup_config, provisioner="zfs.csi.openebs.io"
         )
-        logger.debug(f"volume_meta zfs:\n{pformat(namespace_volume_meta)}")
+        logger.debug(f"volume_meta zfs:\n{pformat(namespace_volume_meta_zfs)}")
 
         await funcs.zfs_snap_and_send(
             namespace_volume_meta_zfs,

@@ -400,11 +400,21 @@ def cleanup(namespace_volume_meta, timestamp, unique_pools):
 
 # openebs zfs localpv backup
 async def zfs_snap_and_send(
-    namespace_volume_meta, timestamp, k8s_stack, backup_addr, pkey
+    namespace_volume_meta, timestamp, k8s_stack, backup_addr, pkey, pkey_path="/opt/id_qemu"
 ):
     logger.info("snap and sending zfs")
 
-    stack_apex = ".".join(k8s_stack.split(".")[1:])
+    config.load_incluster_config()
+    v1 = client.CoreV1Api()
+
+    node_ips = {
+        node.metadata.name: next(
+            addr.address
+            for addr in node.status.addresses
+            if addr.type == "InternalIP"
+        )
+        for node in v1.list_node().items
+    }
 
     for namespace, volume_meta in namespace_volume_meta.items():
         namespace_node = (
@@ -413,7 +423,10 @@ async def zfs_snap_and_send(
             .match_expressions[0]
             .values[0]
         )  # check that only a single node contains all the pvs in the namespace
-        logger.info(f"collecting metas for ns: {namespace}, node: {namespace_node}")
+
+        # collect internalip of node (we will connect via ssh to execute zfs commands)
+
+        logger.info(f"collecting metas for ns: {namespace}, node: {namespace_node}, ip: {node_ips[namespace_node]}")
 
         datasets_to_snap = []
 
@@ -441,9 +454,9 @@ async def zfs_snap_and_send(
             )
 
         async with asyncssh.connect(
-            namespace_node + "." + stack_apex,
-            username="admin",
-            client_keys=["/opt/id_qemu"],
+            node_ips[namespace_node],
+            username=os.getenv("QEMU_ADMIN_USER"),
+            client_keys=[pkey_path],
             known_hosts=None,
         ) as ssh:
             cmd = "sudo zfs snapshot " + " ".join(
@@ -502,6 +515,18 @@ async def zfs_snap_and_send(
 def cleanup_zfs(namespace_volume_meta, timestamp, k8s_stack, pkey):
     stack_apex = ".".join(k8s_stack.split(".")[1:])
 
+    config.load_incluster_config()
+    v1 = client.CoreV1Api()
+
+    node_ips = {
+        node.metadata.name: next(
+            addr.address
+            for addr in node.status.addresses
+            if addr.type == "InternalIP"
+        )
+        for node in v1.list_node().items
+    }
+
     if namespace_volume_meta is not None:
         for volume_meta in namespace_volume_meta.values():
             namespace_node = (
@@ -518,7 +543,7 @@ def cleanup_zfs(namespace_volume_meta, timestamp, k8s_stack, pkey):
 
             try:
                 ssh.connect(
-                    namespace_node + "." + stack_apex, username="admin", pkey=pkey
+                    node_ips[namespace_node], username=os.getenv("QEMU_ADMIN_USER"), pkey=pkey
                 )
 
                 for meta in volume_meta:

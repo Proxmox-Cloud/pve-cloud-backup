@@ -21,7 +21,7 @@ from pve_cloud.cli.pvclu import (get_cloud_domain, get_ssh_master_kubeconfig,
 from pve_cloud.lib.inventory import (get_cluster_vars,
                                      get_online_pve_host_from_target_pve)
 from pve_cloud_backup._version import __version__ as bkp_version
-
+from pve_cloud.lib.ssh import connect_host
 from pve_cloud_backup.daemon.funcs import get_backup_base_dir
 from pve_cloud_backup.daemon.rpc import Command
 
@@ -156,39 +156,81 @@ async def list_backups_remote(args):
 
 
 async def launch_restore_job(args):
+    serializable_args = vars(args).copy()
+    serializable_args["func"] = args.func.__name__
+
     with open(args.inventory, "r") as file:
-        kubespray_inv = yaml.safe_load(file)
+        raw_pxc_inv = yaml.safe_load(file)
 
-    # fetch the kubeconfig of the cluster we want to launch the restore job in
-    online_pve_host, jump_host = get_online_pve_host_from_target_pve(
-        kubespray_inv["target_pve"]
-    )
+    if "plugin" not in raw_pxc_inv or raw_pxc_inv["plugin"] not in ["pxc.cloud.kubespray_inv", "pxc.cloud.ext_hosts_inv"]:
+        raise ValueError("Pxc incompatible inventory passed!")
 
-    external_cp_defined = (
-        "extra_control_plane_sans" in kubespray_inv
-        and kubespray_inv["extra_control_plane_sans"]
-    )
+    # todo: again this could be solved with a better generic schema handeling
+    if raw_pxc_inv["plugin"] == "pxc.cloud.ext_hosts_inv":
+        # validate that k0s_single host is there
+        if not "ungrouped" in raw_pxc_inv["host_groups"] and not "k0s_single" in raw_pxc_inv["host_groups"]["ungrouped"]:
+            raise ValueError("Unsuitable ext_hosts_inv passed! Needs ungrouped.k0s_single host.")
 
-    if jump_host and not external_cp_defined:
-        raise NotImplementedError(
-            "Jump host functionality requires external san to be set for the kubernetes cluster!"
+    kubeconfig_dict = None
+
+    if raw_pxc_inv["plugin"] == "pxc.cloud.kubespray_inv":
+        kubespray_inv = raw_pxc_inv
+
+        # fetch the kubeconfig of the cluster we want to launch the restore job in
+        online_pve_host, jump_host = get_online_pve_host_from_target_pve(
+            kubespray_inv["target_pve"]
         )
 
-    if jump_host:
-        kubeconfig_dict = yaml.safe_load(
-            get_ssh_remote_master_kubeconfig(
-                kubespray_inv["stack_name"],
-                kubespray_inv["extra_control_plane_sans"][0],
-                jump_host,
-                online_pve_host,
+        external_cp_defined = (
+            "extra_control_plane_sans" in kubespray_inv
+            and kubespray_inv["extra_control_plane_sans"]
+        )
+
+        if jump_host and not external_cp_defined:
+            raise NotImplementedError(
+                "Jump host functionality requires external san to be set for the kubernetes cluster!"
             )
-        )
-    else:
-        cluster_vars = get_cluster_vars(online_pve_host)
 
-        kubeconfig_dict = yaml.safe_load(
-            get_ssh_master_kubeconfig(cluster_vars, kubespray_inv["stack_name"])
-        )
+        if jump_host:
+            kubeconfig_dict = yaml.safe_load(
+                get_ssh_remote_master_kubeconfig(
+                    kubespray_inv["stack_name"],
+                    kubespray_inv["extra_control_plane_sans"][0],
+                    jump_host,
+                    online_pve_host,
+                )
+            )
+        else:
+            cluster_vars = get_cluster_vars(online_pve_host)
+
+            kubeconfig_dict = yaml.safe_load(
+                get_ssh_master_kubeconfig(cluster_vars, kubespray_inv["stack_name"])
+            )
+
+        # todo: maybe parameterize?
+        serializable_args["node_user"] = "admin" # default for kubespray
+        serializable_args["node_key_path"] = "/opt/id_qemu"
+
+    elif raw_pxc_inv["plugin"] == "pxc.cloud.ext_hosts_inv":
+
+        # online_pve_host, jump_host = get_online_pve_host_from_target_pve(
+        #     raw_pxc_inv["target_cluster"] + "." + raw_pxc_inv["pve_cloud_domain"]
+        # )
+
+        # if jump_host:
+        #     raise NotImplementedError(
+        #         "Jump host functionality not supported for k0s edge yet!"
+        #     )
+
+        k0s_single = raw_pxc_inv["host_groups"]["ungrouped"]["k0s_single"]
+
+        with connect_host(k0s_single["ansible_host"], user=k0s_single["ansible_user"]) as ssh:
+            _, stdout, _ = ssh.exec_command("sudo k0s kubeconfig admin")
+
+            kubeconfig_dict = yaml.safe_load(stdout.read().decode("utf-8"))
+
+        serializable_args["node_user"] = k0s_single["ansible_user"] # works with passwordless sudo
+        serializable_args["node_key_path"] = "/opt/id_ext"
 
     # init kube client for launching the restore job
     loader = KubeConfigLoader(config_dict=kubeconfig_dict)
@@ -199,8 +241,6 @@ async def launch_restore_job(args):
     core_v1 = client.CoreV1Api(api_instance)
     batch_v1 = client.BatchV1Api(api_instance)
 
-    serializable_args = vars(args).copy()
-    serializable_args["func"] = args.func.__name__
 
     # check if ceph secrets exist
     ceph_secrets_available = True
@@ -229,11 +269,20 @@ async def launch_restore_job(args):
         V1EnvVar(name="LOG_LEVEL", value=args.log_level),
     ]
 
-    volume_mounts = [
-        V1VolumeMount(
-            name="fetcher-secrets", mount_path="/opt/id_qemu", sub_path="qemu-id"
-        ),
-    ]
+    volume_mounts = []
+    if raw_pxc_inv["plugin"] == "pxc.cloud.kubespray_inv":
+        volume_mounts.append(
+            V1VolumeMount(
+                name="fetcher-secrets", mount_path="/opt/id_qemu", sub_path="qemu-id"
+            ),
+        )
+
+    elif raw_pxc_inv["plugin"] == "pxc.cloud.ext_hosts_inv":
+        volume_mounts.append(
+            V1VolumeMount(
+                name="fetcher-secrets", mount_path="/opt/id_ext", sub_path="ext-id"
+            ),
+        )
 
     if ceph_secrets_available:
         volume_mounts.extend(
@@ -360,7 +409,7 @@ def get_parser():
     k8s_restore_parser.add_argument(
         "--inventory",
         type=str,
-        help="PVE cloud kubespray inventory yaml file, in this cluster the restore job will be launched.",
+        help="PVE cloud kubespray inventory yaml file or pxc external hosts k0s conform inventory file, in this cluster the restore job will be launched.",
         required=True,
     )
     k8s_restore_parser.add_argument(

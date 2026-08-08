@@ -304,25 +304,25 @@ async def run():
 
 
 def main():
-    # wait for drive to be available
-    while True:
-        try:
-            get_backup_base_dir()
-            logger.info("Backup drive is available!")
-            break
-        except FileNotFoundError as e:
-            logger.debug(e)
-            logger.info("Backup drive not found, startup delayed.")
-            time.sleep(5)
+    # # wait for drive to be available
+    # while True:
+    #     try:
+    #         get_backup_base_dir()
+    #         logger.info("Backup drive is available!")
+    #         break
+    #     except FileNotFoundError as e:
+    #         logger.debug(e)
+    #         logger.info("Backup drive not found, startup delayed.")
+    #         time.sleep(5)
 
     if ENV == "PRODUCTION":
         copy_backup_generic()
 
-    backup_store_env_vars = ["PXC_BACKUP_BASE_DIR", "PXC_REMOVABLE_DATASTORES"]
-    num_defined = len([var for var in backup_store_env_vars if os.getenv(var)])
-    if num_defined != 1:
-        raise Exception(
-            f"Number of defined backup store vars is {num_defined} but should only be exactly 1 defined!"
-        )
+    # backup_store_env_vars = ["PXC_BACKUP_BASE_DIR", "PXC_REMOVABLE_DATASTORES"]
+    # num_defined = len([var for var in backup_store_env_vars if os.getenv(var)])
+    # if num_defined != 1:
+    #     raise Exception(
+    #         f"Number of defined backup store vars is {num_defined} but should only be exactly 1 defined!"
+    #     )
 
     asyncio.run(run())

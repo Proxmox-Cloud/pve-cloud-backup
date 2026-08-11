@@ -8,20 +8,18 @@ import pickle
 import ssl
 import struct
 import subprocess
-import time
 import uuid
-import socketio
 from pprint import pformat
 
 import asyncssh
 import paramiko
+import socketio
 import zstandard as zstd
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 from kubernetes.utils.quantity import parse_quantity
-from tinydb import Query, TinyDB
-
 from pve_cloud.lib.backup_rpc import Command
+from tinydb import Query, TinyDB
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -58,14 +56,12 @@ async def init_procedure_bdd(restore_args):
             f"https://{restore_args['mc_gw_host']}",
             auth={
                 "token": restore_args["mc_ext_token"],
-                "bdd_stack_name": restore_args["bdd_stack_name"]
+                "bdd_stack_name": restore_args["bdd_stack_name"],
             },
-            transports=["websocket"]
+            transports=["websocket"],
         )
         result_pickled = await sio.call(
-            "init_restore",
-            restore_args["timestamp"],
-            timeout=30
+            "init_restore", restore_args["timestamp"], timeout=30
         )
         logger.info("init restore result")
         result = pickle.loads(result_pickled)
@@ -178,8 +174,8 @@ async def procedure():
     restore_args = json.loads(base64.b64decode(os.getenv("PXC_RESTORE_ARGS")))
     logger.info(restore_args)
 
-    connection, metas_grouped_by_ns, namespace_secret_dict = (
-        await init_procedure_bdd(restore_args)
+    connection, metas_grouped_by_ns, namespace_secret_dict = await init_procedure_bdd(
+        restore_args
     )
 
     # now we start the restore procedure
@@ -298,7 +294,8 @@ async def procedure():
                 remaining = [
                     pod.metadata.name
                     for pod in pods.items
-                    if pod.status.phase in ["Running", "Pending", "Terminating", "Failed"]
+                    if pod.status.phase
+                    in ["Running", "Pending", "Terminating", "Failed"]
                 ]
                 if not remaining:
                     logger.info("All pods have terminated.")
@@ -489,11 +486,8 @@ async def procedure():
                     if restore_args["use_mc_gw"]:
                         await connection.call(
                             "init_request",
-                            {
-                                "archive": request_archive,
-                                "artifact": request_artifact
-                            },
-                            timeout=30
+                            {"archive": request_archive, "artifact": request_artifact},
+                            timeout=30,
                         )
                     else:
                         reader, writer = connection
@@ -511,19 +505,16 @@ async def procedure():
                     while True:
                         chunk = None
                         if restore_args["use_mc_gw"]:
-                            chunk = await connection.call(
-                                "request_chunk",
-                                timeout=30
-                            )
+                            chunk = await connection.call("request_chunk", timeout=30)
                             if not chunk:
                                 break
                         else:
                             reader, writer = connection
 
                             # client first always sends chunk size
-                            chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[
-                                0
-                            ]
+                            chunk_size = struct.unpack(
+                                "!I", (await reader.readexactly(4))
+                            )[0]
                             if chunk_size == 0:
                                 logger.debug("received eof")
                                 break  # client sends 0 chunk size at the end to signal that its finished uploading
@@ -670,11 +661,8 @@ async def procedure():
                 if restore_args["use_mc_gw"]:
                     await connection.call(
                         "init_request",
-                        {
-                            "archive": request_archive,
-                            "artifact": request_artifact
-                        },
-                        timeout=30
+                        {"archive": request_archive, "artifact": request_artifact},
+                        timeout=30,
                     )
                 else:
                     reader, writer = connection
@@ -700,10 +688,7 @@ async def procedure():
                 while True:
                     chunk = None
                     if restore_args["use_mc_gw"]:
-                        chunk = await connection.call(
-                            "request_chunk",
-                            timeout=30
-                        )
+                        chunk = await connection.call("request_chunk", timeout=30)
                         if not chunk:
                             break
                     else:
@@ -850,10 +835,7 @@ async def procedure():
                 )
 
         if restore_args["use_mc_gw"]:
-            await connection.call(
-                "request_done",
-                timeout=30
-            )
+            await connection.call("request_done", timeout=30)
 
             await connection.disconnect()
 

@@ -8,8 +8,8 @@ import os
 import pickle
 import ssl
 import struct
-import socketio
 
+import socketio
 import yaml
 from kubernetes import client
 from kubernetes.client import (ApiException, V1ConfigMapVolumeSource,
@@ -19,22 +19,23 @@ from kubernetes.client import (ApiException, V1ConfigMapVolumeSource,
 from kubernetes.config.kube_config import KubeConfigLoader
 from pve_cloud.cli.pvclu import (get_cloud_domain, get_ssh_master_kubeconfig,
                                  get_ssh_remote_master_kubeconfig)
-from pve_cloud.lib.inventory import (get_cluster_vars, get_online_pve_host,
-                                     get_online_pve_host_from_target_pve,
-                                     get_cloud_domain,
-                                     get_pve_inventory)
 from pve_cloud.cli.pxrpc import launch_pxrpc
+from pve_cloud.lib.backup_rpc import Command
+from pve_cloud.lib.inventory import (get_cloud_domain, get_cluster_vars,
+                                     get_online_pve_host,
+                                     get_online_pve_host_from_target_pve,
+                                     get_pve_inventory)
 from pve_cloud.lib.ssh import connect_host
 from pve_cloud_backup._version import __version__ as bkp_version
 
 from pve_cloud_backup.daemon.funcs import get_backup_base_dir
-from pve_cloud.lib.backup_rpc import Command
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
 
 logging.basicConfig(level=log_level)
 logger = logging.getLogger("brctl")
+
 
 async def list_backup_details_remote(args):
 
@@ -59,7 +60,9 @@ async def list_backup_details_remote(args):
             # we will create a socket connection to the multi cloud gateway for that we need to fetch secrets
             ext_mc_raw = pxrpc.get_cloud_secret(cloud_domain, "external-mc-token")
             if not ext_mc_raw:
-                raise RuntimeError(f"No multi cloud services could be discovered for {pve_cluster} - {cloud_domain}!")
+                raise RuntimeError(
+                    f"No multi cloud services could be discovered for {pve_cluster} - {cloud_domain}!"
+                )
 
             ext_mc = json.loads(ext_mc_raw)
             logger.info(ext_mc)
@@ -69,17 +72,10 @@ async def list_backup_details_remote(args):
 
             sio.connect(
                 f"https://{ext_mc['mc_gw_host']}",
-                auth={
-                    "token": ext_mc["token"],
-                    "bdd_stack_name": bdd_stack_name
-                },
-                transports=["websocket"]
+                auth={"token": ext_mc["token"], "bdd_stack_name": bdd_stack_name},
+                transports=["websocket"],
             )
-            result = sio.call(
-                "list_backup_details",
-                args.timestamp,
-                timeout=30
-            )
+            result = sio.call("list_backup_details", args.timestamp, timeout=30)
 
             sio.disconnect()
 
@@ -89,9 +85,13 @@ async def list_backup_details_remote(args):
             # we will connect directly to the backup server
             # todo: here we can also pass the correct tls config
 
-            tls_disc_raw = pxrpc.get_cloud_secret(cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery")
+            tls_disc_raw = pxrpc.get_cloud_secret(
+                cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery"
+            )
             if not tls_disc_raw:
-                raise RuntimeError("Could not find discovery secret for the provided bdd stack name!")
+                raise RuntimeError(
+                    "Could not find discovery secret for the provided bdd stack name!"
+                )
 
             tls_disc = json.loads(tls_disc_raw)
 
@@ -101,7 +101,9 @@ async def list_backup_details_remote(args):
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE
 
-            reader, writer = await asyncio.open_connection(tls_disc["server_int_ip"], 8085, ssl=ssl_ctx)
+            reader, writer = await asyncio.open_connection(
+                tls_disc["server_int_ip"], 8085, ssl=ssl_ctx
+            )
             writer.write(struct.pack("B", Command.LIST_BACKUP_DETAILS.value))
             await writer.drain()
 
@@ -160,18 +162,18 @@ async def list_backup_details_remote(args):
                 secret_name = secret["metadata"]["name"]
 
                 if secret_name.startswith("sh.helm.release.v1."):
-                    release_split = secret_name.removeprefix("sh.helm.release.v1.").split(
-                        "."
-                    )
+                    release_split = secret_name.removeprefix(
+                        "sh.helm.release.v1."
+                    ).split(".")
                     release_name = release_split[0]
                     release_num = int(release_split[1].removeprefix("v"))
                     # collect the latest helm release
                     if (
                         not release_name in helm_releases
                         or int(
-                            helm_releases[release_name]["metadata"]["name"].removeprefix(
-                                f"sh.helm.release.v1.{release_name}.v"
-                            )
+                            helm_releases[release_name]["metadata"][
+                                "name"
+                            ].removeprefix(f"sh.helm.release.v1.{release_name}.v")
                         )
                         < release_num
                     ):
@@ -192,7 +194,6 @@ async def list_backup_details_remote(args):
                     print(
                         f"    - {release_info['chart']['metadata']['name']} - version: {release_info['chart']['metadata']['version']}"
                     )
-
 
 
 async def list_backups_remote(args):
@@ -216,7 +217,9 @@ async def list_backups_remote(args):
         if args.use_mc_gw:
             ext_mc_raw = pxrpc.get_cloud_secret(cloud_domain, "external-mc-token")
             if not ext_mc_raw:
-                raise RuntimeError(f"No multi cloud services could be discovered for {pve_cluster} - {cloud_domain}!")
+                raise RuntimeError(
+                    f"No multi cloud services could be discovered for {pve_cluster} - {cloud_domain}!"
+                )
 
             ext_mc = json.loads(ext_mc_raw)
             logger.info(ext_mc)
@@ -226,25 +229,23 @@ async def list_backups_remote(args):
 
             sio.connect(
                 f"https://{ext_mc['mc_gw_host']}",
-                auth={
-                    "token": ext_mc["token"],
-                    "bdd_stack_name": bdd_stack_name
-                },
-                transports=["websocket"]
+                auth={"token": ext_mc["token"], "bdd_stack_name": bdd_stack_name},
+                transports=["websocket"],
             )
-            result = sio.call(
-                "list_backups",
-                timeout=30
-            )
+            result = sio.call("list_backups", timeout=30)
 
             sio.disconnect()
 
             archives = result["archives"]
 
         else:
-            tls_disc_raw = pxrpc.get_cloud_secret(cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery")
+            tls_disc_raw = pxrpc.get_cloud_secret(
+                cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery"
+            )
             if not tls_disc_raw:
-                raise RuntimeError("Could not find discovery secret for the provided bdd stack name!")
+                raise RuntimeError(
+                    "Could not find discovery secret for the provided bdd stack name!"
+                )
 
             tls_disc = json.loads(tls_disc_raw)
 
@@ -252,7 +253,9 @@ async def list_backups_remote(args):
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE
 
-            reader, writer = await asyncio.open_connection(tls_disc["server_int_ip"], 8085, ssl=ssl_ctx)
+            reader, writer = await asyncio.open_connection(
+                tls_disc["server_int_ip"], 8085, ssl=ssl_ctx
+            )
             writer.write(struct.pack("B", Command.LIST_BACKUPS.value))
             await writer.drain()
 
@@ -369,7 +372,9 @@ async def launch_restore_job(args):
         if args.use_mc_gw:
             ext_mc_raw = pxrpc.get_cloud_secret(cloud_domain, "external-mc-token")
             if not ext_mc_raw:
-                raise RuntimeError(f"No multi cloud services could be discovered for {pve_cluster} - {cloud_domain}!")
+                raise RuntimeError(
+                    f"No multi cloud services could be discovered for {pve_cluster} - {cloud_domain}!"
+                )
 
             ext_mc = json.loads(ext_mc_raw)
             logger.info(ext_mc)
@@ -379,9 +384,13 @@ async def launch_restore_job(args):
             serializable_args["bdd_stack_name"] = bdd_stack_name
 
         else:
-            tls_disc_raw = pxrpc.get_cloud_secret(cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery")
+            tls_disc_raw = pxrpc.get_cloud_secret(
+                cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery"
+            )
             if not tls_disc_raw:
-                raise RuntimeError("Could not find discovery secret for the provided bdd stack name!")
+                raise RuntimeError(
+                    "Could not find discovery secret for the provided bdd stack name!"
+                )
 
             tls_disc = json.loads(tls_disc_raw)
 
@@ -534,7 +543,9 @@ def get_parser():
         # required=True,
     )
     base_parser.add_argument(
-        "--use-mc-gw", action="store_true", help="Configures the backup job with the clouds external gateway instead of the internal bdd servers ip."
+        "--use-mc-gw",
+        action="store_true",
+        help="Configures the backup job with the clouds external gateway instead of the internal bdd servers ip.",
     )
     # todo: implement bdd-host-address
 

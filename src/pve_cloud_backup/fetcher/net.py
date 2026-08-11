@@ -4,10 +4,9 @@ import os
 import pickle
 import ssl
 import struct
+
 import socketio
-
 import zstandard as zstd
-
 from pve_cloud.lib.backup_rpc import Command
 
 logger = logging.getLogger("fetcher")
@@ -59,7 +58,9 @@ async def send_cchunk(writer, compressed_chunk):
 
 async def get_sio_mc_client(backup_addr):
     if not os.getenv("MC_EXT_TOKEN"):
-        raise RuntimeError("Tried to initialize multicloud proxy without providing MC_EXT_TOKEN env var!")
+        raise RuntimeError(
+            "Tried to initialize multicloud proxy without providing MC_EXT_TOKEN env var!"
+        )
 
     sio = socketio.AsyncClient(logger=True, engineio_logger=True)
 
@@ -67,9 +68,9 @@ async def get_sio_mc_client(backup_addr):
         backup_addr,
         auth={
             "token": os.getenv("MC_EXT_TOKEN"),
-            "bdd_stack_name": os.getenv("BDD_STACK_NAME")
+            "bdd_stack_name": os.getenv("BDD_STACK_NAME"),
         },
-        transports=["websocket"]
+        transports=["websocket"],
     )
 
     return sio
@@ -167,7 +168,6 @@ async def archive(backup_addr, request_dict, chunk_generator):
         if not result["ok"]:
             raise RuntimeError(result["error"])
 
-
         compressor = zstd.ZstdCompressor(
             level=1,
             threads=6,
@@ -219,13 +219,7 @@ async def meta(backup_addr, cmd, meta_dict):
     if backup_addr.startswith("https://"):
         sio = await get_sio_mc_client(backup_addr)
 
-        await sio.call(
-            "bdd_meta",
-            {
-                "command": cmd.value,
-                "meta_dict": meta_dict
-            }
-        )
+        await sio.call("bdd_meta", {"command": cmd.value, "meta_dict": meta_dict})
 
         await sio.disconnect()
 

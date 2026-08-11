@@ -10,6 +10,7 @@ import struct
 import subprocess
 import time
 import uuid
+import socketio
 from pprint import pformat
 
 import asyncssh
@@ -20,7 +21,7 @@ from kubernetes.client.rest import ApiException
 from kubernetes.utils.quantity import parse_quantity
 from tinydb import Query, TinyDB
 
-from pve_cloud_backup.daemon.rpc import Command
+from pve_cloud.lib.backup_rpc import Command
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -50,45 +51,67 @@ def convert_keys_to_camel_case(obj):
 
 
 async def init_procedure_bdd(restore_args):
+    if restore_args["use_mc_gw"]:
+        sio = socketio.AsyncClient(logger=True, engineio_logger=True)
 
-    # connect to the backup server and start the restore procedure
-    # we simply trust the host here as the ca is only available from
-    # postgres secrets
-    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
+        await sio.connect(
+            f"https://{restore_args['mc_gw_host']}",
+            auth={
+                "token": restore_args["mc_ext_token"],
+                "bdd_stack_name": restore_args["bdd_stack_name"]
+            },
+            transports=["websocket"]
+        )
+        result_pickled = await sio.call(
+            "init_restore",
+            restore_args["timestamp"],
+            timeout=30
+        )
+        logger.info("init restore result")
+        result = pickle.loads(result_pickled)
+        logger.info(result)
 
-    reader, writer = await asyncio.open_connection(
-        restore_args["bdd_host"], 8085, ssl=ssl_ctx
-    )
-    writer.write(struct.pack("B", Command.RESTORE_PROCEDURE.value))
-    await writer.drain()
+        return sio, result["metas_grouped_by_ns"], result["namespace_secret_dict"]
 
-    # first we send the timestamp and receive our meta information for the restore
-    writer.write((restore_args["timestamp"] + "\n").encode())
-    await writer.drain()
+    else:
+        # connect to the backup server and start the restore procedure
+        # we simply trust the host here as the ca is only available from
+        # postgres secrets
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
 
-    # read the archives
-    dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-    metas = pickle.loads((await reader.readexactly(dict_size)))
+        reader, writer = await asyncio.open_connection(
+            restore_args["bdd_host"], 8085, ssl=ssl_ctx
+        )
+        writer.write(struct.pack("B", Command.RESTORE_PROCEDURE.value))
+        await writer.drain()
 
-    metas_grouped_by_ns = {}
+        # first we send the timestamp and receive our meta information for the restore
+        writer.write((restore_args["timestamp"] + "\n").encode())
+        await writer.drain()
 
-    for meta in metas:
-        if meta["namespace"] not in metas_grouped_by_ns:
-            metas_grouped_by_ns[meta["namespace"]] = []
+        # read the archives
+        dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+        metas = pickle.loads((await reader.readexactly(dict_size)))
 
-        metas_grouped_by_ns[meta["namespace"]].append(meta)
+        metas_grouped_by_ns = {}
 
-    # read the the meta information
-    dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-    stack_meta = pickle.loads((await reader.readexactly(dict_size)))
+        for meta in metas:
+            if meta["namespace"] not in metas_grouped_by_ns:
+                metas_grouped_by_ns[meta["namespace"]] = []
 
-    namespace_secret_dict = pickle.loads(
-        base64.b64decode(stack_meta["namespace_secret_dict_b64"])
-    )
+            metas_grouped_by_ns[meta["namespace"]].append(meta)
 
-    return reader, writer, metas_grouped_by_ns, namespace_secret_dict
+        # read the the meta information
+        dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+        stack_meta = pickle.loads((await reader.readexactly(dict_size)))
+
+        namespace_secret_dict = pickle.loads(
+            base64.b64decode(stack_meta["namespace_secret_dict_b64"])
+        )
+
+        return (reader, writer), metas_grouped_by_ns, namespace_secret_dict
 
 
 def clean_pvc_dict(pvc_dict):
@@ -155,7 +178,7 @@ async def procedure():
     restore_args = json.loads(base64.b64decode(os.getenv("PXC_RESTORE_ARGS")))
     logger.info(restore_args)
 
-    reader, writer, metas_grouped_by_ns, namespace_secret_dict = (
+    connection, metas_grouped_by_ns, namespace_secret_dict = (
         await init_procedure_bdd(restore_args)
     )
 
@@ -275,13 +298,13 @@ async def procedure():
                 remaining = [
                     pod.metadata.name
                     for pod in pods.items
-                    if pod.status.phase in ["Running", "Pending", "Terminating"]
+                    if pod.status.phase in ["Running", "Pending", "Terminating", "Failed"]
                 ]
                 if not remaining:
                     logger.info("All pods have terminated.")
                     break
                 logger.info(f"Still active pods: {remaining}")
-                time.sleep(5)
+                await asyncio.sleep(5)
 
         # check if namespace has pods => throw exeption and tell user to scale down any
         pods = core_v1.list_namespaced_pod(namespace=restore_namespace)
@@ -360,7 +383,7 @@ async def procedure():
                     logger.info("All PVCs have been deleted.")
                     break
                 logger.info(f"Still waiting on: {[p.metadata.name for p in leftover]}")
-                time.sleep(5)
+                await asyncio.sleep(5)
 
             # there are no more existing pvcs
             existing_pvcs = set()
@@ -463,25 +486,49 @@ async def procedure():
                         f"requesting borg archive stream from bdd {request_archive} - {request_artifact} into dd zvol import {pool}/pvc-{restore_pvc_uuid}"
                     )
 
-                    # bdd server does readline()
-                    writer.write(request_archive.encode())
-                    await writer.drain()
+                    if restore_args["use_mc_gw"]:
+                        await connection.call(
+                            "init_request",
+                            {
+                                "archive": request_archive,
+                                "artifact": request_artifact
+                            },
+                            timeout=30
+                        )
+                    else:
+                        reader, writer = connection
 
-                    writer.write(request_artifact.encode())
-                    await writer.drain()
-                    logger.info("send request artifact / archive")
+                        # bdd server does readline()
+                        writer.write(request_archive.encode())
+                        await writer.drain()
+
+                        writer.write(request_artifact.encode())
+                        await writer.drain()
+
+                    logger.info("send request artifact / archive - requesting chunks")
 
                     # read compressed chunks
                     while True:
-                        # client first always sends chunk size
-                        chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[
-                            0
-                        ]
-                        if chunk_size == 0:
-                            logger.debug("received eof")
-                            break  # client sends 0 chunk size at the end to signal that its finished uploading
+                        chunk = None
+                        if restore_args["use_mc_gw"]:
+                            chunk = await connection.call(
+                                "request_chunk",
+                                timeout=30
+                            )
+                            if not chunk:
+                                break
+                        else:
+                            reader, writer = connection
 
-                        chunk = await reader.readexactly(chunk_size)
+                            # client first always sends chunk size
+                            chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[
+                                0
+                            ]
+                            if chunk_size == 0:
+                                logger.debug("received eof")
+                                break  # client sends 0 chunk size at the end to signal that its finished uploading
+
+                            chunk = await reader.readexactly(chunk_size)
 
                         proc.stdin.write(chunk)
                         await proc.stdin.drain()
@@ -620,12 +667,24 @@ async def procedure():
                     f"requesting borg archive stream from bdd {request_archive} - {request_artifact} into rbd import {pool}/{new_csi_image_name}"
                 )
 
-                # bdd server does readline()
-                writer.write(request_archive.encode())
-                await writer.drain()
+                if restore_args["use_mc_gw"]:
+                    await connection.call(
+                        "init_request",
+                        {
+                            "archive": request_archive,
+                            "artifact": request_artifact
+                        },
+                        timeout=30
+                    )
+                else:
+                    reader, writer = connection
 
-                writer.write(request_artifact.encode())
-                await writer.drain()
+                    # bdd server does readline()
+                    writer.write(request_archive.encode())
+                    await writer.drain()
+
+                    writer.write(request_artifact.encode())
+                    await writer.drain()
 
                 # pipe the resulting stream into rbd import
                 rbd_import_proc = await asyncio.create_subprocess_exec(
@@ -639,11 +698,26 @@ async def procedure():
                 # read compressed chunks
                 decompressor = zstd.ZstdDecompressor().decompressobj()
                 while True:
-                    # client first always sends chunk size
-                    chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-                    if chunk_size == 0:
-                        break  # client sends 0 chunk size at the end to signal that its finished uploading
-                    chunk = await reader.readexactly(chunk_size)
+                    chunk = None
+                    if restore_args["use_mc_gw"]:
+                        chunk = await connection.call(
+                            "request_chunk",
+                            timeout=30
+                        )
+                        if not chunk:
+                            break
+                    else:
+                        reader, writer = connection
+
+                        # client first always sends chunk size
+                        chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[
+                            0
+                        ]
+                        if chunk_size == 0:
+                            logger.debug("received eof")
+                            break  # client sends 0 chunk size at the end to signal that its finished uploading
+
+                        chunk = await reader.readexactly(chunk_size)
 
                     # decompress and write
                     decompressed_chunk = decompressor.decompress(chunk)
@@ -775,13 +849,24 @@ async def procedure():
                     )
                 )
 
-        # send the done signal to bdd server
-        writer.write("##BRCTL-DONE\n".encode())
-        await writer.drain()
+        if restore_args["use_mc_gw"]:
+            await connection.call(
+                "request_done",
+                timeout=30
+            )
 
-        # close the writer here
-        writer.close()
-        await writer.wait_closed()
+            await connection.disconnect()
+
+        else:
+            reader, writer = connection
+
+            # send the done signal to bdd server
+            writer.write("##BRCTL-DONE\n".encode())
+            await writer.drain()
+
+            # close the writer here
+            writer.close()
+            await writer.wait_closed()
 
         # scale back up again
         if restore_args["auto_scale"]:

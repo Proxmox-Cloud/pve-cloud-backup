@@ -8,6 +8,7 @@ import os
 import pickle
 import ssl
 import struct
+import socketio
 
 import yaml
 from kubernetes import client
@@ -18,13 +19,16 @@ from kubernetes.client import (ApiException, V1ConfigMapVolumeSource,
 from kubernetes.config.kube_config import KubeConfigLoader
 from pve_cloud.cli.pvclu import (get_cloud_domain, get_ssh_master_kubeconfig,
                                  get_ssh_remote_master_kubeconfig)
-from pve_cloud.lib.inventory import (get_cluster_vars,
-                                     get_online_pve_host_from_target_pve)
+from pve_cloud.lib.inventory import (get_cluster_vars, get_online_pve_host,
+                                     get_online_pve_host_from_target_pve,
+                                     get_cloud_domain,
+                                     get_pve_inventory)
+from pve_cloud.cli.pxrpc import launch_pxrpc
 from pve_cloud.lib.ssh import connect_host
 from pve_cloud_backup._version import __version__ as bkp_version
 
 from pve_cloud_backup.daemon.funcs import get_backup_base_dir
-from pve_cloud_backup.daemon.rpc import Command
+from pve_cloud.lib.backup_rpc import Command
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -32,128 +36,238 @@ log_level = getattr(logging, log_level_str, logging.INFO)
 logging.basicConfig(level=log_level)
 logger = logging.getLogger("brctl")
 
-
 async def list_backup_details_remote(args):
-    # cli trusts the server without verifying
-    # fetching ca is too inconvinient
-    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
 
-    reader, writer = await asyncio.open_connection(args.bdd_host, 8085, ssl=ssl_ctx)
-    writer.write(struct.pack("B", Command.LIST_BACKUP_DETAILS.value))
-    await writer.drain()
+    # get the connection to the clouds patroni database
+    cloud_domain = get_cloud_domain(args.bdd_stack_fqdn)
+    pve_inventory = get_pve_inventory(cloud_domain)
 
-    # send the timestamp string
-    writer.write((args.timestamp + "\n").encode())
-    await writer.drain()
+    # simply pick the first available cluster
+    pve_cluster = next(iter(pve_inventory))
+    pve_host, jump_host = get_online_pve_host(pve_inventory, pve_cluster)
 
-    # read the archives
-    dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-    metas = pickle.loads((await reader.readexactly(dict_size)))
+    bdd_stack_name = args.bdd_stack_fqdn.removesuffix(f".{cloud_domain}")
 
-    # first we group metas
-    k8s_stack = metas[0]["stack"]
+    # launch our rpc service to read discovery secrets and prepare
+    # acessing the backup server
+    logger.info(f"connecting to {pve_host} via {jump_host}")
+    metas = None
+    stack_meta = None
 
-    print(f"k8s stack {k8s_stack}:")
+    with launch_pxrpc(jump_host, pve_host) as (pxrpc, pve_host_conn):
+        if args.use_mc_gw:
+            # we will create a socket connection to the multi cloud gateway for that we need to fetch secrets
+            ext_mc_raw = pxrpc.get_cloud_secret(cloud_domain, "external-mc-token")
+            if not ext_mc_raw:
+                raise RuntimeError(f"No multi cloud services could be discovered for {pve_cluster} - {cloud_domain}!")
 
-    # query the server for backup secrets
-    writer.write((k8s_stack + "\n").encode())
-    await writer.drain()
+            ext_mc = json.loads(ext_mc_raw)
+            logger.info(ext_mc)
 
-    # read the the meta information
-    dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-    stack_meta = pickle.loads((await reader.readexactly(dict_size)))
+            # we connect via socketio to the gateway
+            sio = socketio.Client(logger=True, engineio_logger=True)
 
-    namespace_secret_dict = pickle.loads(
-        base64.b64decode(stack_meta["namespace_secret_dict_b64"])
-    )
+            sio.connect(
+                f"https://{ext_mc['mc_gw_host']}",
+                auth={
+                    "token": ext_mc["token"],
+                    "bdd_stack_name": bdd_stack_name
+                },
+                transports=["websocket"]
+            )
+            result = sio.call(
+                "list_backup_details",
+                args.timestamp,
+                timeout=30
+            )
 
-    namespace_k8s_metas = {}
+            sio.disconnect()
 
-    # group metas by namespace
-    for meta in metas:
-        if meta["namespace"] not in namespace_k8s_metas:
-            namespace_k8s_metas[meta["namespace"]] = []
+            metas = result["metas"]
+            stack_meta = result["stack_meta"]
+        else:
+            # we will connect directly to the backup server
+            # todo: here we can also pass the correct tls config
 
-        namespace_k8s_metas[meta["namespace"]].append(meta)
+            tls_disc_raw = pxrpc.get_cloud_secret(cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery")
+            if not tls_disc_raw:
+                raise RuntimeError("Could not find discovery secret for the provided bdd stack name!")
 
-    for namespace, k8s_metas in namespace_k8s_metas.items():
-        print(f"- namespace {namespace}:")
-        print(f"  - volumes:")
-        for meta in k8s_metas:
-            pvc_name = meta["pvc_name"]
-            pool = meta["pool"]
-            storage_class = meta["storage_class"]
-            print(f"    - {pvc_name}, pool {pool}, storage class {storage_class}")
+            tls_disc = json.loads(tls_disc_raw)
 
-        helm_releases = {}
+            # cli trusts the server without verifying
+            # fetching ca is too inconvinient
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
 
-        print(f"  - secrets:")
-        for secret in namespace_secret_dict[namespace]:
-            secret_name = secret["metadata"]["name"]
+            reader, writer = await asyncio.open_connection(tls_disc["server_int_ip"], 8085, ssl=ssl_ctx)
+            writer.write(struct.pack("B", Command.LIST_BACKUP_DETAILS.value))
+            await writer.drain()
 
-            if secret_name.startswith("sh.helm.release.v1."):
-                release_split = secret_name.removeprefix("sh.helm.release.v1.").split(
-                    "."
-                )
-                release_name = release_split[0]
-                release_num = int(release_split[1].removeprefix("v"))
-                # collect the latest helm release
-                if (
-                    not release_name in helm_releases
-                    or int(
-                        helm_releases[release_name]["metadata"]["name"].removeprefix(
-                            f"sh.helm.release.v1.{release_name}.v"
+            # send the timestamp string
+            writer.write((args.timestamp + "\n").encode())
+            await writer.drain()
+
+            # read the archives
+            dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+            metas = pickle.loads((await reader.readexactly(dict_size)))
+
+            # first we group metas
+            k8s_stack = metas[0]["stack"]
+
+            print(f"k8s stack {k8s_stack}:")
+
+            # query the server for backup secrets
+            writer.write((k8s_stack + "\n").encode())
+            await writer.drain()
+
+            # read the the meta information
+            dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+            stack_meta = pickle.loads((await reader.readexactly(dict_size)))
+
+            # send a terminator
+            # todo: probably not needed anymore
+            writer.write("##BRCTL-DONE\n".encode())
+            await writer.drain()
+
+        namespace_secret_dict = pickle.loads(
+            base64.b64decode(stack_meta["namespace_secret_dict_b64"])
+        )
+
+        namespace_k8s_metas = {}
+
+        # group metas by namespace
+        for meta in metas:
+            if meta["namespace"] not in namespace_k8s_metas:
+                namespace_k8s_metas[meta["namespace"]] = []
+
+            namespace_k8s_metas[meta["namespace"]].append(meta)
+
+        for namespace, k8s_metas in namespace_k8s_metas.items():
+            print(f"- namespace {namespace}:")
+            print(f"  - volumes:")
+            for meta in k8s_metas:
+                pvc_name = meta["pvc_name"]
+                pool = meta["pool"]
+                storage_class = meta["storage_class"]
+                print(f"    - {pvc_name}, pool {pool}, storage class {storage_class}")
+
+            helm_releases = {}
+
+            print(f"  - secrets:")
+            for secret in namespace_secret_dict[namespace]:
+                secret_name = secret["metadata"]["name"]
+
+                if secret_name.startswith("sh.helm.release.v1."):
+                    release_split = secret_name.removeprefix("sh.helm.release.v1.").split(
+                        "."
+                    )
+                    release_name = release_split[0]
+                    release_num = int(release_split[1].removeprefix("v"))
+                    # collect the latest helm release
+                    if (
+                        not release_name in helm_releases
+                        or int(
+                            helm_releases[release_name]["metadata"]["name"].removeprefix(
+                                f"sh.helm.release.v1.{release_name}.v"
+                            )
+                        )
+                        < release_num
+                    ):
+                        helm_releases[release_name] = secret
+                else:
+                    print(f"    - {secret_name}")  # print non helm secrets
+
+            if helm_releases:
+                print("  - helm releases:")
+                for release_name, release_secret in helm_releases.items():
+                    release_info = json.loads(
+                        gzip.decompress(
+                            base64.b64decode(
+                                base64.b64decode(release_secret["data"]["release"])
+                            )
                         )
                     )
-                    < release_num
-                ):
-                    helm_releases[release_name] = secret
-            else:
-                print(f"    - {secret_name}")  # print non helm secrets
-
-        if helm_releases:
-            print("  - helm releases:")
-            for release_name, release_secret in helm_releases.items():
-                release_info = json.loads(
-                    gzip.decompress(
-                        base64.b64decode(
-                            base64.b64decode(release_secret["data"]["release"])
-                        )
+                    print(
+                        f"    - {release_info['chart']['metadata']['name']} - version: {release_info['chart']['metadata']['version']}"
                     )
-                )
-                print(
-                    f"    - {release_info['chart']['metadata']['name']} - version: {release_info['chart']['metadata']['version']}"
-                )
 
-    # send a terminator
-    writer.write("##BRCTL-DONE\n".encode())
-    await writer.drain()
 
 
 async def list_backups_remote(args):
 
-    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
+    # get the connection to the clouds patroni database
+    cloud_domain = get_cloud_domain(args.bdd_stack_fqdn)
+    pve_inventory = get_pve_inventory(cloud_domain)
 
-    reader, writer = await asyncio.open_connection(args.bdd_host, 8085, ssl=ssl_ctx)
-    writer.write(struct.pack("B", Command.LIST_BACKUPS.value))
-    await writer.drain()
+    # simply pick the first available cluster
+    pve_cluster = next(iter(pve_inventory))
+    pve_host, jump_host = get_online_pve_host(pve_inventory, pve_cluster)
 
-    # read the response archives size and then the archives
-    dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-    archives = pickle.loads((await reader.readexactly(dict_size)))
+    bdd_stack_name = args.bdd_stack_fqdn.removesuffix(f".{cloud_domain}")
 
-    if args.json:
-        print(json.dumps(sorted(archives)))
-        return
+    # launch our rpc service to read discovery secrets and prepare
+    # acessing the backup server
+    logger.info(f"connecting to {pve_host} via {jump_host}")
+    archives = None
 
-    print("available backup timestamps (ids):")
+    with launch_pxrpc(jump_host, pve_host) as (pxrpc, pve_host_conn):
+        if args.use_mc_gw:
+            ext_mc_raw = pxrpc.get_cloud_secret(cloud_domain, "external-mc-token")
+            if not ext_mc_raw:
+                raise RuntimeError(f"No multi cloud services could be discovered for {pve_cluster} - {cloud_domain}!")
 
-    for timestamp in sorted(archives):
-        print(f"- timestamp {timestamp}")
+            ext_mc = json.loads(ext_mc_raw)
+            logger.info(ext_mc)
+
+            # we connect via socketio to the gateway
+            sio = socketio.Client(logger=True, engineio_logger=True)
+
+            sio.connect(
+                f"https://{ext_mc['mc_gw_host']}",
+                auth={
+                    "token": ext_mc["token"],
+                    "bdd_stack_name": bdd_stack_name
+                },
+                transports=["websocket"]
+            )
+            result = sio.call(
+                "list_backups",
+                timeout=30
+            )
+
+            sio.disconnect()
+
+            archives = result["archives"]
+
+        else:
+            tls_disc_raw = pxrpc.get_cloud_secret(cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery")
+            if not tls_disc_raw:
+                raise RuntimeError("Could not find discovery secret for the provided bdd stack name!")
+
+            tls_disc = json.loads(tls_disc_raw)
+
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+
+            reader, writer = await asyncio.open_connection(tls_disc["server_int_ip"], 8085, ssl=ssl_ctx)
+            writer.write(struct.pack("B", Command.LIST_BACKUPS.value))
+            await writer.drain()
+
+            # read the response archives size and then the archives
+            dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+            archives = pickle.loads((await reader.readexactly(dict_size)))
+
+        if args.json:
+            print(json.dumps(sorted(archives)))
+            return
+
+        print("available backup timestamps (ids):")
+
+        for timestamp in sorted(archives):
+            print(f"- timestamp {timestamp}")
 
 
 async def launch_restore_job(args):
@@ -173,11 +287,11 @@ async def launch_restore_job(args):
     if raw_pxc_inv["plugin"] == "pxc.cloud.ext_hosts_inv":
         # validate that k0s_single host is there
         if (
-            not "ungrouped" in raw_pxc_inv["host_groups"]
-            and not "k0s_single" in raw_pxc_inv["host_groups"]["ungrouped"]
+            not "typed_host_groups" in raw_pxc_inv
+            and not "k0s_edge" in raw_pxc_inv["typed_host_groups"]
         ):
             raise ValueError(
-                "Unsuitable ext_hosts_inv passed! Needs ungrouped.k0s_single host."
+                "Unsuitable ext_hosts_inv passed! Needs k0s_edge typed host group."
             )
 
     kubeconfig_dict = None
@@ -222,16 +336,7 @@ async def launch_restore_job(args):
 
     elif raw_pxc_inv["plugin"] == "pxc.cloud.ext_hosts_inv":
 
-        # online_pve_host, jump_host = get_online_pve_host_from_target_pve(
-        #     raw_pxc_inv["target_cluster"] + "." + raw_pxc_inv["pve_cloud_domain"]
-        # )
-
-        # if jump_host:
-        #     raise NotImplementedError(
-        #         "Jump host functionality not supported for k0s edge yet!"
-        #     )
-
-        k0s_single = raw_pxc_inv["host_groups"]["ungrouped"]["k0s_single"]
+        k0s_single = raw_pxc_inv["typed_host_groups"]["k0s_edge"]["k0s_single"]
 
         with connect_host(
             k0s_single["ansible_host"], user=k0s_single["ansible_user"]
@@ -244,6 +349,43 @@ async def launch_restore_job(args):
             "ansible_user"
         ]  # works with passwordless sudo
         serializable_args["node_key_path"] = "/opt/id_ext"
+
+    # next we prepare connection credentials the restore job will use to either
+    # connect to the backup server directly or through our multicloud gateway
+    cloud_domain = get_cloud_domain(args.bdd_stack_fqdn)
+    pve_inventory = get_pve_inventory(cloud_domain)
+
+    # simply pick the first available cluster
+    pve_cluster = next(iter(pve_inventory))
+    pve_host, jump_host = get_online_pve_host(pve_inventory, pve_cluster)
+
+    bdd_stack_name = args.bdd_stack_fqdn.removesuffix(f".{cloud_domain}")
+
+    # launch our rpc service to read discovery secrets and prepare
+    # acessing the backup server
+    logger.info(f"connecting to {pve_host} via {jump_host}")
+
+    with launch_pxrpc(jump_host, pve_host) as (pxrpc, pve_host_conn):
+        if args.use_mc_gw:
+            ext_mc_raw = pxrpc.get_cloud_secret(cloud_domain, "external-mc-token")
+            if not ext_mc_raw:
+                raise RuntimeError(f"No multi cloud services could be discovered for {pve_cluster} - {cloud_domain}!")
+
+            ext_mc = json.loads(ext_mc_raw)
+            logger.info(ext_mc)
+
+            serializable_args["mc_ext_token"] = ext_mc["token"]
+            serializable_args["mc_gw_host"] = ext_mc["mc_gw_host"]
+            serializable_args["bdd_stack_name"] = bdd_stack_name
+
+        else:
+            tls_disc_raw = pxrpc.get_cloud_secret(cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery")
+            if not tls_disc_raw:
+                raise RuntimeError("Could not find discovery secret for the provided bdd stack name!")
+
+            tls_disc = json.loads(tls_disc_raw)
+
+            serializable_args["bdd_host"] = tls_disc["server_int_ip"]
 
     # init kube client for launching the restore job
     loader = KubeConfigLoader(config_dict=kubeconfig_dict)
@@ -380,11 +522,21 @@ def get_parser():
 
     base_parser = argparse.ArgumentParser(add_help=False)
     base_parser.add_argument(
-        "--bdd-host",
+        "--bdd-stack-fqdn",
         type=str,
-        help="The target bdd server that hosts our backups. Needed for all operations.",
+        help="Stack name + pve cloud domain of the backup server in the target cloud from the k8s inventory. Needed for all operations. You need to be connected to the cloud using pvcli connect commands.",
         required=True,
     )
+    base_parser.add_argument(
+        "--inventory",
+        type=str,
+        help="PVE cloud kubespray inventory yaml file or pxc external hosts k0s conform inventory file, in this cluster the restore job will be launched.",
+        # required=True,
+    )
+    base_parser.add_argument(
+        "--use-mc-gw", action="store_true", help="Configures the backup job with the clouds external gateway instead of the internal bdd servers ip."
+    )
+    # todo: implement bdd-host-address
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -416,12 +568,6 @@ def get_parser():
         "--timestamp",
         type=str,
         help="Timestamp of the backup to restore.",
-        required=True,
-    )
-    k8s_restore_parser.add_argument(
-        "--inventory",
-        type=str,
-        help="PVE cloud kubespray inventory yaml file or pxc external hosts k0s conform inventory file, in this cluster the restore job will be launched.",
         required=True,
     )
     k8s_restore_parser.add_argument(

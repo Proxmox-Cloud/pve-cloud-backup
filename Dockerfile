@@ -21,8 +21,13 @@ COPY requirements.txt ./
 
 RUN python3 -m venv /opt/fetcher
 
-# when needed update like pve-cloud-controller tdd build 
-RUN /opt/fetcher/bin/pip install ${LOCAL_PYPI_IP:+--index-url http://$LOCAL_PYPI_IP:8088/simple }${LOCAL_PYPI_IP:+--trusted-host $LOCAL_PYPI_IP }-r requirements.txt
+RUN if [ -n "$LOCAL_PYPI_IP" ]; then \
+        echo "Running tdd build"; \
+        /opt/fetcher/bin/pip install --upgrade --upgrade-strategy eager --no-cache-dir --index-url http://$LOCAL_PYPI_IP:8088/simple --trusted-host $LOCAL_PYPI_IP -r requirements.txt; \
+    else \
+        echo "Running normal build"; \
+        /opt/fetcher/bin/pip install -r requirements.txt; \
+    fi
 
 # install the package
 COPY pyproject.toml ./

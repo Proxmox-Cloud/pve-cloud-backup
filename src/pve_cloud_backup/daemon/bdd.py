@@ -6,12 +6,12 @@ import ssl
 import struct
 
 import zstandard as zstd
+from pve_cloud.lib.backup_rpc import Command
 from tinydb import Query, TinyDB
 
 from pve_cloud_backup.daemon.funcs import (copy_backup_generic,
                                            get_backup_base_dir,
                                            get_volume_metas, init_backup_dir)
-from pve_cloud_backup.daemon.rpc import Command
 from pve_cloud_backup.fetcher.net import send_cchunk
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -39,7 +39,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     addr = writer.get_extra_info("peername")
     logger.info(f"Connection from {addr}")
 
-    command = Command(struct.unpack("B", await reader.read(1))[0])
+    command = Command(struct.unpack("B", await reader.readexactly(1))[0])
     logger.info(f"{addr} send command: {command}")
 
     try:
@@ -236,6 +236,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     writer.write(meta_pickled)
                     await writer.drain()
 
+                logger.info(
+                    "send initial config / secrets - waiting for archive requests"
+                )
                 # next the client requests the archives which we extract here and pipe via a stream
                 while True:
                     # open the extract process and send the stream the output

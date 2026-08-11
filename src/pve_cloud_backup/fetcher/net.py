@@ -5,9 +5,9 @@ import pickle
 import ssl
 import struct
 
+import socketio
 import zstandard as zstd
-
-from pve_cloud_backup.daemon.rpc import Command
+from pve_cloud.lib.backup_rpc import Command
 
 logger = logging.getLogger("fetcher")
 
@@ -56,88 +56,192 @@ async def send_cchunk(writer, compressed_chunk):
         await writer.drain()
 
 
-async def archive_async(backup_addr, request_dict, chunk_generator, compress=True):
-    logger.info(request_dict)
-    reader, writer = await asyncio.open_connection(
-        backup_addr, 8085, ssl=get_strict_client_ssl_ctx()
+async def get_sio_mc_client(backup_addr):
+    if not os.getenv("MC_EXT_TOKEN"):
+        raise RuntimeError(
+            "Tried to initialize multicloud proxy without providing MC_EXT_TOKEN env var!"
+        )
+
+    sio = socketio.AsyncClient(logger=True, engineio_logger=True)
+
+    await sio.connect(
+        backup_addr,
+        auth={
+            "token": os.getenv("MC_EXT_TOKEN"),
+            "bdd_stack_name": os.getenv("BDD_STACK_NAME"),
+        },
+        transports=["websocket"],
     )
 
-    await archive_init(reader, writer, request_dict)
+    return sio
 
-    # initialize the synchronous generator and start reading chunks, compress and send
-    # compressor = zlib.compressobj(level=1)
-    if compress:
-        compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
-        async for chunk in chunk_generator():
-            await send_cchunk(writer, compressor.compress(chunk))
-        # send rest in compressor, compress doesnt always return a byte array, see bdd.py doc
-        # send size first again
-        await send_cchunk(writer, compressor.flush())
+
+# compress parameter exists for chunk generators that already do the compression
+# the receiving side ALWAYS expects a compressed stream
+async def archive_async(backup_addr, request_dict, chunk_generator, compress=True):
+    logger.info(request_dict)
+
+    if backup_addr.startswith("https://"):
+        logger.info(f"sending archive to mc gateway {backup_addr}")
+        # connection to mc gw
+        sio = await get_sio_mc_client(backup_addr)
+
+        result = await sio.call(
+            "archive_init",
+            request_dict,
+            timeout=30,
+        )
+
+        if not result["ok"]:
+            raise RuntimeError(result["error"])
+
+        if compress:
+            compressor = zstd.ZstdCompressor(
+                level=1,
+                threads=6,
+            ).compressobj()
+
+            async for chunk in chunk_generator():
+                await sio.call(
+                    "backup_chunk",
+                    compressor.compress(chunk),
+                )
+
+            await sio.call(
+                "backup_chunk",
+                compressor.flush(),
+            )
+
+        else:
+            async for chunk in chunk_generator():
+                await sio.call("backup_chunk", chunk)
+
+        await sio.call("backup_eof")
+
+        await sio.disconnect()
 
     else:
-        async for chunk in chunk_generator():
-            writer.write(struct.pack("!I", len(chunk)))
-            await writer.drain()
-            writer.write(chunk)
-            await writer.drain()
+        reader, writer = await asyncio.open_connection(
+            backup_addr, 8085, ssl=get_strict_client_ssl_ctx()
+        )
 
-    # send eof to server, signal that we are done
-    logger.debug("sending eof")
-    writer.write(struct.pack("!I", 0))
-    await writer.drain()
+        await archive_init(reader, writer, request_dict)
 
-    # close the writer here, stdout needs to be closed by caller
-    writer.close()
-    await writer.wait_closed()
+        # initialize the synchronous generator and start reading chunks, compress and send
+        # compressor = zlib.compressobj(level=1)
+        if compress:
+            compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
+            async for chunk in chunk_generator():
+                await send_cchunk(writer, compressor.compress(chunk))
+            # send rest in compressor, compress doesnt always return a byte array, see bdd.py doc
+            # send size first again
+            await send_cchunk(writer, compressor.flush())
+
+        else:
+            async for chunk in chunk_generator():
+                writer.write(struct.pack("!I", len(chunk)))
+                await writer.drain()
+                writer.write(chunk)
+                await writer.drain()
+
+        # send eof to server, signal that we are done
+        logger.debug("sending eof")
+        writer.write(struct.pack("!I", 0))
+        await writer.drain()
+
+        # close the writer here, stdout needs to be closed by caller
+        writer.close()
+        await writer.wait_closed()
 
 
 async def archive(backup_addr, request_dict, chunk_generator):
     logger.info(request_dict)
-    reader, writer = await asyncio.open_connection(
-        backup_addr, 8085, ssl=get_strict_client_ssl_ctx()
-    )
+    if backup_addr.startswith("https://"):
+        sio = await get_sio_mc_client(backup_addr)
 
-    await archive_init(reader, writer, request_dict)
+        result = await sio.call(
+            "archive_init",
+            request_dict,
+            timeout=30,
+        )
 
-    # initialize the synchronous generator and start reading chunks, compress and send
-    # compressor = zlib.compressobj(level=1)
-    compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
-    for chunk in chunk_generator():
-        await send_cchunk(writer, compressor.compress(chunk))
+        if not result["ok"]:
+            raise RuntimeError(result["error"])
 
-    # send rest in compressor, compress doesnt always return a byte array, see bdd.py doc
-    # send size first again
-    await send_cchunk(writer, compressor.flush())
+        compressor = zstd.ZstdCompressor(
+            level=1,
+            threads=6,
+        ).compressobj()
 
-    # send eof to server, signal that we are done
-    logger.debug("sending eof")
-    writer.write(struct.pack("!I", 0))
-    await writer.drain()
+        for chunk in chunk_generator():
+            await sio.call(
+                "backup_chunk",
+                compressor.compress(chunk),
+            )
 
-    # close the writer here, stdout needs to be closed by caller
-    writer.close()
-    await writer.wait_closed()
+        await sio.call(
+            "backup_chunk",
+            compressor.flush(),
+        )
+
+        await sio.call("backup_eof")
+
+        await sio.disconnect()
+
+    else:
+        reader, writer = await asyncio.open_connection(
+            backup_addr, 8085, ssl=get_strict_client_ssl_ctx()
+        )
+
+        await archive_init(reader, writer, request_dict)
+
+        # initialize the synchronous generator and start reading chunks, compress and send
+        # compressor = zlib.compressobj(level=1)
+        compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
+        for chunk in chunk_generator():
+            await send_cchunk(writer, compressor.compress(chunk))
+
+        # send rest in compressor, compress doesnt always return a byte array, see bdd.py doc
+        # send size first again
+        await send_cchunk(writer, compressor.flush())
+
+        # send eof to server, signal that we are done
+        logger.debug("sending eof")
+        writer.write(struct.pack("!I", 0))
+        await writer.drain()
+
+        # close the writer here, stdout needs to be closed by caller
+        writer.close()
+        await writer.wait_closed()
 
 
 async def meta(backup_addr, cmd, meta_dict):
-    reader, writer = await asyncio.open_connection(
-        backup_addr, 8085, ssl=get_strict_client_ssl_ctx()
-    )
-    writer.write(struct.pack("B", cmd.value))
-    await writer.drain()
+    if backup_addr.startswith("https://"):
+        sio = await get_sio_mc_client(backup_addr)
 
-    meta_pickled = pickle.dumps(meta_dict)
+        await sio.call("bdd_meta", {"command": cmd.value, "meta_dict": meta_dict})
 
-    # send size first
-    writer.write(struct.pack("!I", len(meta_pickled)))
-    await writer.drain()
+        await sio.disconnect()
 
-    # now send the dict
-    writer.write(meta_pickled)
-    await writer.drain()
+    else:
+        reader, writer = await asyncio.open_connection(
+            backup_addr, 8085, ssl=get_strict_client_ssl_ctx()
+        )
+        writer.write(struct.pack("B", cmd.value))
+        await writer.drain()
 
-    writer.close()
-    await writer.wait_closed()
+        meta_pickled = pickle.dumps(meta_dict)
+
+        # send size first
+        writer.write(struct.pack("!I", len(meta_pickled)))
+        await writer.drain()
+
+        # now send the dict
+        writer.write(meta_pickled)
+        await writer.drain()
+
+        writer.close()
+        await writer.wait_closed()
 
 
 async def volume_meta(backup_addr, meta_dict):

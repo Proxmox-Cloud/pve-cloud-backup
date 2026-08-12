@@ -88,6 +88,35 @@ async def sio_send_cchunk(sio, compressed_chunk):
     if compressed_chunk:
         await sio.call("backup_chunk", compressed_chunk)
 
+async def wait_archive_init(sio, request_dict):
+    initial = await sio.call(
+        "archive_init",
+        request_dict,
+        timeout=30,
+    )
+    if initial["status"] == "ERR":
+        raise RuntimeError(initial["error"])
+
+    if initial["status"] == "ACQUIRED":
+        return
+
+    logger.info("waiting for lock")
+    # status WAIT
+    while True:
+        wait_call = await sio.call(
+            "wait_archive",
+            timeout=30
+        )
+
+        if wait_call["status"] == "ERR":
+            raise RuntimeError(initial["error"])
+
+        if wait_call["status"] == "ACQUIRED":
+            return
+
+        # continue wait
+        logger.info("continueing waiting")
+
 
 # compress parameter exists for chunk generators that already do the compression
 # the receiving side ALWAYS expects a compressed stream
@@ -99,16 +128,7 @@ async def archive_async(backup_addr, request_dict, chunk_generator, compress=Tru
         # connection to mc gw
         sio = await get_sio_mc_client(backup_addr)
 
-        logger.debug("sending archive init call")
-        result = await sio.call(
-            "archive_init",
-            request_dict,
-            timeout=30,
-        )
-
-        logger.debug(f"init response {result['ok']}")
-        if not result["ok"]:
-            raise RuntimeError(result["error"])
+        await wait_archive_init(sio, request_dict)
 
         if compress:
             compressor = zstd.ZstdCompressor(
@@ -167,14 +187,7 @@ async def archive(backup_addr, request_dict, chunk_generator):
     if backup_addr.startswith("https://"):
         sio = await get_sio_mc_client(backup_addr)
 
-        result = await sio.call(
-            "archive_init",
-            request_dict,
-            timeout=30,
-        )
-
-        if not result["ok"]:
-            raise RuntimeError(result["error"])
+        await wait_archive_init(sio, request_dict)
 
         compressor = zstd.ZstdCompressor(
             level=1,

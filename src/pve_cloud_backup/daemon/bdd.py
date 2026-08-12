@@ -80,7 +80,6 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                 try:
                     borg_archive = f"{backup_dir}::{archive_name}_{timestamp}"
-                    logger.info(f"accuired lock {backup_dir}")
 
                     # send continue signal, meaning we have the lock and export can start.
                     writer.write(b"\x01")  # signal = 0x01 means "continue"
@@ -279,7 +278,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     logger.info(request_artifact)
 
                     backup_dir = f"{get_backup_base_dir()}/{request_archive}"
-                    lock = await get_lock(backup_dir):
+                    lock = await get_lock(backup_dir)
                     async with lock:
                         logger.info(
                             f"running borg extract on {backup_dir}::{request_artifact}"

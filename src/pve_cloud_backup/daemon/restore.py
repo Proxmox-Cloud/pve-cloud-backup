@@ -848,7 +848,6 @@ async def procedure():
 
             # close the writer here
             writer.close()
-            await writer.wait_closed()
 
         # scale back up again
         if restore_args["auto_scale"]:

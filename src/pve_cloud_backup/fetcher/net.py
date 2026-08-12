@@ -151,7 +151,6 @@ async def archive_async(backup_addr, request_dict, chunk_generator, compress=Tru
 
         # close the writer here, stdout needs to be closed by caller
         writer.close()
-        await writer.wait_closed()
 
 
 async def archive(backup_addr, request_dict, chunk_generator):
@@ -212,7 +211,6 @@ async def archive(backup_addr, request_dict, chunk_generator):
 
         # close the writer here, stdout needs to be closed by caller
         writer.close()
-        await writer.wait_closed()
 
 
 async def meta(backup_addr, cmd, meta_dict):
@@ -241,7 +239,6 @@ async def meta(backup_addr, cmd, meta_dict):
         await writer.drain()
 
         writer.close()
-        await writer.wait_closed()
 
 
 async def volume_meta(backup_addr, meta_dict):

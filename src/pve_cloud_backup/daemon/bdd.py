@@ -63,8 +63,21 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 else:
                     backup_dir = init_backup_dir(borg_archive_type)
 
-                # lock locally, we have one borg archive per archive type
-                async with get_lock(backup_dir):
+                # send ping pong while waiting on lock
+                # maybe this is also needed in other rpc call types
+                lock = get_lock(backup_dir)
+
+                while True:
+                    try:
+                        await asyncio.wait_for(lock.acquire(), timeout=5)
+                        logger.info(f"accuired lock {backup_dir}")
+                        break
+                    except asyncio.TimeoutError:
+                        writer.write(b"\x02")
+                        await writer.drain()
+                        logger.debug("send keepalive waiting for lock, continueing...")
+
+                try:
                     borg_archive = f"{backup_dir}::{archive_name}_{timestamp}"
                     logger.info(f"accuired lock {backup_dir}")
 
@@ -118,6 +131,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                     if exit_code != 0:
                         raise Exception(f"Borg failed with code {exit_code}")
+
+                finally:
+                    lock.release()
 
             case Command.NAMESPACE_SECRETS:
                 # read meta dict size

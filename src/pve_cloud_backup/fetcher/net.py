@@ -39,10 +39,18 @@ async def archive_init(reader, writer, request_dict):
     # wait for go signal, server needs to aquire write lock
     # we dont
     logger.debug("waiting for go from bdd")
-    signal = await reader.readexactly(1)
-    if signal != b"\x01":
-        logger.error("recieved incorrect go signal")
-        raise Exception("Incorrect go signal!")
+    while True:
+        signal = await reader.readexactly(1)
+        if signal == b"\x02":
+            logger.debug("waiting for lock continues...")
+            continue
+
+        if signal != b"\x01":
+            logger.error("recieved incorrect go signal")
+            raise Exception("Incorrect go signal!")
+        else:
+            break
+
     logger.debug("received go")
 
 

@@ -94,7 +94,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[
                             0
                         ]
+                        logger.debug(f"received chunk size {chunk_size}")
                         if chunk_size == 0:
+                            logger.debug("received chunk size 0, finished")
                             break  # client sends 0 chunk size at the end to signal that its finished uploading
                         chunk = await reader.readexactly(chunk_size)
 
@@ -106,6 +108,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                     # the decompressor does not always return a decompressed chunk but might retain
                     # and return empty. at the end we need to call flush to get everything out
+                    logger.debug("flushing, draining and closing")
                     borg_proc.stdin.write(decompressor.flush())
                     await borg_proc.stdin.drain()
 

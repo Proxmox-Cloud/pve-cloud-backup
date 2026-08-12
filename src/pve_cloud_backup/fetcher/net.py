@@ -72,9 +72,15 @@ async def get_sio_mc_client(backup_addr):
         },
         transports=["websocket"],
     )
-
+    logger.debug(f"Connected sio client to {backup_addr}")
     return sio
 
+async def sio_send_cchunk(sio, compressed_chunk):
+    if compressed_chunk:
+        await sio.call(
+            "backup_chunk",
+            compressed_chunk
+        )
 
 # compress parameter exists for chunk generators that already do the compression
 # the receiving side ALWAYS expects a compressed stream
@@ -86,12 +92,14 @@ async def archive_async(backup_addr, request_dict, chunk_generator, compress=Tru
         # connection to mc gw
         sio = await get_sio_mc_client(backup_addr)
 
+        logger.debug("sending archive init call")
         result = await sio.call(
             "archive_init",
             request_dict,
             timeout=30,
         )
 
+        logger.debug(f"init response {result['ok']}")
         if not result["ok"]:
             raise RuntimeError(result["error"])
 
@@ -102,15 +110,9 @@ async def archive_async(backup_addr, request_dict, chunk_generator, compress=Tru
             ).compressobj()
 
             async for chunk in chunk_generator():
-                await sio.call(
-                    "backup_chunk",
-                    compressor.compress(chunk),
-                )
+                await sio_send_cchunk(sio, compressor.compress(chunk))
 
-            await sio.call(
-                "backup_chunk",
-                compressor.flush(),
-            )
+            await sio_send_cchunk(sio, compressor.flush())
 
         else:
             async for chunk in chunk_generator():
@@ -173,15 +175,9 @@ async def archive(backup_addr, request_dict, chunk_generator):
         ).compressobj()
 
         for chunk in chunk_generator():
-            await sio.call(
-                "backup_chunk",
-                compressor.compress(chunk),
-            )
+            await sio_send_cchunk(sio, compressor.compress(chunk))
 
-        await sio.call(
-            "backup_chunk",
-            compressor.flush(),
-        )
+        await sio_send_cchunk(sio, compressor.flush())
 
         await sio.call("backup_eof")
 

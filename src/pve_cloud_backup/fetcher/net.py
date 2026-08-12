@@ -75,12 +75,11 @@ async def get_sio_mc_client(backup_addr):
     logger.debug(f"Connected sio client to {backup_addr}")
     return sio
 
+
 async def sio_send_cchunk(sio, compressed_chunk):
     if compressed_chunk:
-        await sio.call(
-            "backup_chunk",
-            compressed_chunk
-        )
+        await sio.call("backup_chunk", compressed_chunk)
+
 
 # compress parameter exists for chunk generators that already do the compression
 # the receiving side ALWAYS expects a compressed stream

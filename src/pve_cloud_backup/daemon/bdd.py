@@ -25,14 +25,15 @@ ENV = os.getenv("ENV", "TESTING")
 BACKUP_TYPES = ["k8s", "nextcloud", "git", "postgres"]
 
 lock_dict = {}
-
+lock_dict_lock = asyncio.Lock()
 
 # to prevent from writing to the same borg archive parallel
-def get_lock(backup_dir):
-    if backup_dir not in lock_dict:
-        lock_dict[backup_dir] = asyncio.Lock()
+async def get_lock(backup_dir):
+    async with lock_dict_lock:
+        if backup_dir not in lock_dict:
+            lock_dict[backup_dir] = asyncio.Lock()
 
-    return lock_dict[backup_dir]
+        return lock_dict[backup_dir]
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -65,7 +66,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                 # send ping pong while waiting on lock
                 # maybe this is also needed in other rpc call types
-                lock = get_lock(backup_dir)
+                lock = await get_lock(backup_dir)
 
                 while True:
                     try:
@@ -142,7 +143,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                 db_path = f"{get_backup_base_dir()}/ns-secret-db.json"
 
-                async with get_lock(db_path):
+                lock = await get_lock(db_path)
+                async with lock:
                     secret_db = TinyDB(db_path)
                     secret_db.insert(meta_dict)
 
@@ -151,7 +153,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 meta_dict = pickle.loads((await reader.readexactly(dict_size)))
                 db_path = f"{get_backup_base_dir()}/volume-meta-db.json"
 
-                async with get_lock(db_path):
+                lock = await get_lock(db_path)
+                async with lock:
                     secret_db = TinyDB(db_path)
                     secret_db.insert(meta_dict)
 
@@ -159,7 +162,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             case Command.LIST_BACKUPS:
                 db_path = f"{get_backup_base_dir()}/volume-meta-db.json"
 
-                async with get_lock(db_path):
+                lock = await get_lock(db_path)
+                async with lock:
                     # we call borg on all our backups and send a return string that is strictly for display via the cli tool
                     timestamp_archives = get_volume_metas()
 
@@ -177,7 +181,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                 db_path = f"{get_backup_base_dir()}/volume-meta-db.json"
 
-                async with get_lock(db_path):
+                lock = await get_lock(db_path)
+                async with lock:
                     # we call borg on all our backups and send a return string that is strictly for display via the cli tool
                     # this time we need the filter for displaying details of a certain backup
                     timestamp_archives = get_volume_metas(timestamp_filter=timestamp)
@@ -193,7 +198,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 # return k8s secret requests
                 db_path = f"{get_backup_base_dir()}/ns-secret-db.json"
 
-                async with get_lock(db_path):
+                lock = await get_lock(db_path)
+                async with lock:
                     secret_db = TinyDB(db_path)
 
                 while True:
@@ -221,7 +227,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                 db_path = f"{get_backup_base_dir()}/volume-meta-db.json"
 
-                async with get_lock(db_path):
+                lock = await get_lock(db_path)
+                async with lock:
                     # we call borg on all our backups and send a return string that is strictly for display via the cli tool
                     # this time we need the filter for displaying details of a certain backup
                     timestamp_archives = get_volume_metas(timestamp_filter=timestamp)
@@ -238,7 +245,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 # return k8s secret requests
                 db_path = f"{get_backup_base_dir()}/ns-secret-db.json"
 
-                async with get_lock(db_path):
+                lock = await get_lock(db_path)
+                async with lock:
                     secret_db = TinyDB(db_path)
 
                     Meta = Query()
@@ -271,8 +279,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     logger.info(request_artifact)
 
                     backup_dir = f"{get_backup_base_dir()}/{request_archive}"
-
-                    async with get_lock(backup_dir):
+                    lock = await get_lock(backup_dir):
+                    async with lock:
                         logger.info(
                             f"running borg extract on {backup_dir}::{request_artifact}"
                         )

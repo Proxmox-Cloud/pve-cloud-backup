@@ -88,6 +88,7 @@ async def sio_send_cchunk(sio, compressed_chunk):
     if compressed_chunk:
         await sio.call("backup_chunk", compressed_chunk)
 
+
 async def wait_archive_init(sio, request_dict):
     initial = await sio.call(
         "archive_init",
@@ -103,10 +104,7 @@ async def wait_archive_init(sio, request_dict):
     logger.info("waiting for lock")
     # status WAIT
     while True:
-        wait_call = await sio.call(
-            "wait_archive",
-            timeout=30
-        )
+        wait_call = await sio.call("wait_archive", timeout=30)
 
         if wait_call["status"] == "ERR":
             raise RuntimeError(initial["error"])

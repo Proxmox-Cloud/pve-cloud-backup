@@ -75,7 +75,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         logger.info(f"accuired lock {backup_dir}")
                         break
                     except asyncio.TimeoutError:
-                        writer.write(b"\x02")
+                        writer.write(b"\x02") # 0x02 byte means continue waiting
                         await writer.drain()
                         logger.debug("send keepalive waiting for lock, continueing...")
 
@@ -109,6 +109,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                             0
                         ]
                         logger.debug(f"received chunk size {chunk_size}")
+
                         if chunk_size == 0:
                             logger.debug("received chunk size 0, finished")
                             break  # client sends 0 chunk size at the end to signal that its finished uploading

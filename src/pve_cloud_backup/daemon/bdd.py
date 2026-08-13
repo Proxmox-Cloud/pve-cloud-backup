@@ -75,7 +75,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         logger.info(f"accuired lock {backup_dir}")
                         break
                     except asyncio.TimeoutError:
-                        writer.write(b"\x02") # 0x02 byte means continue waiting
+                        writer.write(b"\x02")  # 0x02 byte means continue waiting
                         await writer.drain()
                         logger.debug("send keepalive waiting for lock, continueing...")
 

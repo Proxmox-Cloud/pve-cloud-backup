@@ -66,7 +66,6 @@ async def send_cchunk(writer, compressed_chunk):
         await writer.drain()
 
 
-
 async def get_sio_mc_client(backup_addr):
     if not os.getenv("MC_EXT_TOKEN"):
         raise RuntimeError(
@@ -156,7 +155,7 @@ async def archive_async(backup_addr, request_dict, chunk_generator, compress=Tru
 
                 await sio.call("backup_eof")
 
-                break # finished successfully
+                break  # finished successfully
 
             except socketio.exceptions.TimeoutError:
                 logger.warn(f"Error on attempt {attempt}")

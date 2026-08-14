@@ -50,7 +50,8 @@ def convert_keys_to_camel_case(obj):
 
 async def init_procedure_bdd(restore_args):
     if restore_args["use_mc_gw"]:
-        sio = socketio.AsyncClient(logger=True, engineio_logger=True)
+        log_debug = os.getenv("LOG_LEVEL") == "DEBUG"
+        sio = socketio.AsyncClient(logger=log_debug, engineio_logger=log_debug)
 
         await sio.connect(
             f"https://{restore_args['mc_gw_host']}",

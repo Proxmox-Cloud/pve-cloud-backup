@@ -11,6 +11,8 @@ from pve_cloud.lib.backup_rpc import Command
 
 logger = logging.getLogger("fetcher")
 
+SIO_MAX_RETRIES = 3
+
 
 def get_strict_client_ssl_ctx():
     ca_cert_path = os.getenv("BDD_CA_CERT_PATH")
@@ -64,13 +66,15 @@ async def send_cchunk(writer, compressed_chunk):
         await writer.drain()
 
 
+
 async def get_sio_mc_client(backup_addr):
     if not os.getenv("MC_EXT_TOKEN"):
         raise RuntimeError(
             "Tried to initialize multicloud proxy without providing MC_EXT_TOKEN env var!"
         )
 
-    sio = socketio.AsyncClient(logger=True, engineio_logger=True)
+    log_debug = os.getenv("LOG_LEVEL") == "DEBUG"
+    sio = socketio.AsyncClient(logger=log_debug, engineio_logger=log_debug)
 
     await sio.connect(
         backup_addr,
@@ -123,29 +127,48 @@ async def archive_async(backup_addr, request_dict, chunk_generator, compress=Tru
 
     if backup_addr.startswith("https://"):
         logger.info(f"sending archive to mc gateway {backup_addr}")
-        # connection to mc gw
-        sio = await get_sio_mc_client(backup_addr)
 
-        await wait_archive_init(sio, request_dict)
+        # retry is currently only implemented for async generators
+        # which are the primary generator type for large image backups
+        for attempt in range(1, SIO_MAX_RETRIES + 1):
+            sio = None
+            try:
 
-        if compress:
-            compressor = zstd.ZstdCompressor(
-                level=1,
-                threads=6,
-            ).compressobj()
+                # connection to mc gw
+                sio = await get_sio_mc_client(backup_addr)
 
-            async for chunk in chunk_generator():
-                await sio_send_cchunk(sio, compressor.compress(chunk))
+                await wait_archive_init(sio, request_dict)
 
-            await sio_send_cchunk(sio, compressor.flush())
+                if compress:
+                    compressor = zstd.ZstdCompressor(
+                        level=1,
+                        threads=6,
+                    ).compressobj()
 
-        else:
-            async for chunk in chunk_generator():
-                await sio.call("backup_chunk", chunk)
+                    async for chunk in chunk_generator():
+                        await sio_send_cchunk(sio, compressor.compress(chunk))
 
-        await sio.call("backup_eof")
+                    await sio_send_cchunk(sio, compressor.flush())
 
-        await sio.disconnect()
+                else:
+                    async for chunk in chunk_generator():
+                        await sio.call("backup_chunk", chunk)
+
+                await sio.call("backup_eof")
+
+                break # finished successfully
+
+            except socketio.exceptions.TimeoutError:
+                logger.warn(f"Error on attempt {attempt}")
+                if attempt == SIO_MAX_RETRIES:
+                    raise
+
+                logger.info("Retrying...")
+                await asyncio.sleep(10)
+
+            finally:
+                if sio:
+                    await sio.disconnect()
 
     else:
         reader, writer = await asyncio.open_connection(

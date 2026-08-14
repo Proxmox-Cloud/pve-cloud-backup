@@ -68,19 +68,20 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 # send ping pong while waiting on lock
                 # maybe this is also needed in other rpc call types
                 lock = await get_lock(backup_dir)
-
-                while True:
-                    try:
-                        await asyncio.wait_for(lock.acquire(), timeout=5)
-                        logger.info(f"accuired lock {backup_dir}")
-                        break
-                    except asyncio.TimeoutError:
-                        writer.write(b"\x02")  # 0x02 byte means continue waiting
-                        await writer.drain()
-                        logger.debug("send keepalive waiting for lock, continueing...")
-
+                # store ref to kill in case of failure => this will stop the archive from being committet
+                borg_proc = None
+                borg_archive = f"{backup_dir}::{archive_name}_{timestamp}"
                 try:
-                    borg_archive = f"{backup_dir}::{archive_name}_{timestamp}"
+                    # lock wait mechanism
+                    while True:
+                        try:
+                            await asyncio.wait_for(lock.acquire(), timeout=5)
+                            logger.info(f"accuired lock {backup_dir}")
+                            break
+                        except asyncio.TimeoutError:
+                            writer.write(b"\x02")  # 0x02 byte means continue waiting
+                            await writer.drain()
+                            logger.debug("send keepalive waiting for lock, continueing...")
 
                     # send continue signal, meaning we have the lock and export can start.
                     writer.write(b"\x01")  # signal = 0x01 means "continue"
@@ -134,6 +135,21 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     if exit_code != 0:
                         raise Exception(f"Borg failed with code {exit_code}")
 
+                except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError) as e:
+                    logger.warning("Client error on transmission: %s, killing borg...", e, exc_info=True)
+
+                    if borg_proc:
+                        borg_proc.kill()
+                        await borg_proc.wait()
+
+                        # cleanup repo
+                        await asyncio.create_subprocess_exec(
+                            "borg",
+                            "delete",
+                            borg_archive,
+                        )
+                    # reraise exception for main close handler
+                    raise
                 finally:
                     lock.release()
 
@@ -312,8 +328,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         writer.write(struct.pack("!I", 0))
                         await writer.drain()
 
-    except asyncio.IncompleteReadError as e:
-        logger.error("Client disconnected", e)
+    except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError) as e:
+        logger.warning("Client disconnected: %s", e, exc_info=True)
     finally:
         writer.close()
         # dont await on server side

@@ -137,8 +137,16 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     if exit_code != 0:
                         raise RuntimeError(f"Borg failed with code {exit_code}")
 
-                except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError) as e:
-                    logger.warning("Client error on transmission: %s, gracefully terminating borg...", e, exc_info=True)
+                except (
+                    asyncio.IncompleteReadError,
+                    ConnectionResetError,
+                    BrokenPipeError,
+                ) as e:
+                    logger.warning(
+                        "Client error on transmission: %s, gracefully terminating borg...",
+                        e,
+                        exc_info=True,
+                    )
 
                     if borg_proc:
                         borg_proc.terminate()
@@ -146,7 +154,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         try:
                             await asyncio.wait_for(borg_proc.wait(), timeout=30)
                         except asyncio.TimeoutError:
-                            logger.warn("terminate timed out, force killing borg subprocess!")
+                            logger.warn(
+                                "terminate timed out, force killing borg subprocess!"
+                            )
                             borg_proc.kill()
                             await borg_proc.wait()
 

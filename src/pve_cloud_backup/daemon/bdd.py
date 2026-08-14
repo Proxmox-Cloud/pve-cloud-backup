@@ -154,7 +154,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         try:
                             await asyncio.wait_for(borg_proc.wait(), timeout=30)
                         except asyncio.TimeoutError:
-                            logger.warn(
+                            logger.warning(
                                 "terminate timed out, force killing borg subprocess!"
                             )
                             borg_proc.kill()

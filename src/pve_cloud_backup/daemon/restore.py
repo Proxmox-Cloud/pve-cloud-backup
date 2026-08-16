@@ -9,6 +9,7 @@ import ssl
 import struct
 import subprocess
 import uuid
+from contextlib import asynccontextmanager
 from pprint import pformat
 
 import asyncssh
@@ -20,7 +21,6 @@ from kubernetes.client.rest import ApiException
 from kubernetes.utils.quantity import parse_quantity
 from pve_cloud.lib.backup_rpc import Command
 from tinydb import Query, TinyDB
-from contextlib import asynccontextmanager
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -29,6 +29,7 @@ logging.basicConfig(level=log_level)
 logger = logging.getLogger("pxc-restore")
 
 SIO_MAX_RETRIES = 3
+
 
 # these functions are necessary to convert python k8s naming to camel case
 def to_camel_case(snake_str):
@@ -196,9 +197,7 @@ async def procedure():
     restore_args = json.loads(base64.b64decode(os.getenv("PXC_RESTORE_ARGS")))
     logger.info(restore_args)
 
-    metas_grouped_by_ns, namespace_secret_dict = await init_procedure_bdd(
-        restore_args
-    )
+    metas_grouped_by_ns, namespace_secret_dict = await init_procedure_bdd(restore_args)
 
     # now we start the restore procedure
     config.load_incluster_config()
@@ -512,14 +511,21 @@ async def procedure():
                                 async with get_sio_conn(restore_args) as sio:
                                     await sio.call(
                                         "init_request",
-                                        {"archive": request_archive, "artifact": request_artifact},
+                                        {
+                                            "archive": request_archive,
+                                            "artifact": request_artifact,
+                                        },
                                         timeout=30,
                                     )
 
-                                    logger.info("send request artifact / archive - requesting chunks")
+                                    logger.info(
+                                        "send request artifact / archive - requesting chunks"
+                                    )
 
                                     while True:
-                                        chunk = await sio.call("request_chunk", timeout=30)
+                                        chunk = await sio.call(
+                                            "request_chunk", timeout=30
+                                        )
                                         if not chunk:
                                             break
 
@@ -541,13 +547,19 @@ async def procedure():
                                 try:
                                     await asyncio.wait_for(proc.wait(), timeout=30)
                                 except asyncio.TimeoutError:
-                                    logger.warning("terminate timed out, force killing import subprocess!")
+                                    logger.warning(
+                                        "terminate timed out, force killing import subprocess!"
+                                    )
                                     proc.kill()
                                     await proc.wait()
 
                                 # destroy the zfs volume
-                                logger.debug(f"cleaning up zfs vol tank-pv/pvc-{restore_pvc_uuid}")
-                                await ssh.run(f"sudo zfs destroy tank-pv/pvc-{restore_pvc_uuid}")
+                                logger.debug(
+                                    f"cleaning up zfs vol tank-pv/pvc-{restore_pvc_uuid}"
+                                )
+                                await ssh.run(
+                                    f"sudo zfs destroy tank-pv/pvc-{restore_pvc_uuid}"
+                                )
 
                                 logger.info("Retrying...")
                                 await asyncio.sleep(10)
@@ -564,7 +576,9 @@ async def procedure():
                     else:
                         async with get_direct_conn(restore_args) as (reader, writer):
 
-                            writer.write(struct.pack("B", Command.REQUEST_ARCHIVE.value))
+                            writer.write(
+                                struct.pack("B", Command.REQUEST_ARCHIVE.value)
+                            )
                             await writer.drain()
 
                             # bdd server does readline()
@@ -574,7 +588,9 @@ async def procedure():
                             writer.write(request_artifact.encode())
                             await writer.drain()
 
-                            logger.info("send request artifact / archive - requesting chunks")
+                            logger.info(
+                                "send request artifact / archive - requesting chunks"
+                            )
 
                             while True:
                                 # client first always sends chunk size
@@ -589,7 +605,6 @@ async def procedure():
 
                                 proc.stdin.write(chunk)
                                 await proc.stdin.drain()
-
 
                     logger.info("done reading closing proc")
                     proc.stdin.close()
@@ -740,7 +755,10 @@ async def procedure():
                             async with get_sio_conn(restore_args) as sio:
                                 await sio.call(
                                     "init_request",
-                                    {"archive": request_archive, "artifact": request_artifact},
+                                    {
+                                        "archive": request_archive,
+                                        "artifact": request_artifact,
+                                    },
                                     timeout=30,
                                 )
                                 # read compressed chunks
@@ -769,14 +787,20 @@ async def procedure():
                             rbd_import_proc.terminate()
 
                             try:
-                                await asyncio.wait_for(rbd_import_proc.wait(), timeout=30)
+                                await asyncio.wait_for(
+                                    rbd_import_proc.wait(), timeout=30
+                                )
                             except asyncio.TimeoutError:
-                                logger.warning("terminate timed out, force killing import subprocess!")
+                                logger.warning(
+                                    "terminate timed out, force killing import subprocess!"
+                                )
                                 rbd_import_proc.kill()
                                 await rbd_import_proc.wait()
 
                             # destroy the rbd image
-                            logger.debug(f"cleanup rbd image {pool}/{new_csi_image_name}")
+                            logger.debug(
+                                f"cleanup rbd image {pool}/{new_csi_image_name}"
+                            )
                             await asyncio.create_subprocess_exec(
                                 "rbd",
                                 "rm",
@@ -813,9 +837,9 @@ async def procedure():
                         decompressor = zstd.ZstdDecompressor().decompressobj()
                         while True:
                             # client first always sends chunk size
-                            chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[
-                                0
-                            ]
+                            chunk_size = struct.unpack(
+                                "!I", (await reader.readexactly(4))
+                            )[0]
                             if chunk_size == 0:
                                 logger.debug("received eof")
                                 break  # client sends 0 chunk size at the end to signal that its finished uploading
@@ -951,7 +975,6 @@ async def procedure():
                         **convert_keys_to_camel_case(pv_dict)
                     )
                 )
-
 
         # scale back up again
         if restore_args["auto_scale"]:

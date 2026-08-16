@@ -332,9 +332,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         stdout=asyncio.subprocess.PIPE,
                     )
 
-                    compressor = zstd.ZstdCompressor(
-                        level=1, threads=6
-                    ).compressobj()
+                    compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
                     while True:
                         chunk = await proc.stdout.read(4 * 1024 * 1024 * 10)  # 4MB
                         if not chunk:
@@ -349,7 +347,6 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     logger.info("sending eof")
                     writer.write(struct.pack("!I", 0))
                     await writer.drain()
-
 
     except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError) as e:
         logger.warning("Client disconnected: %s", e, exc_info=True)

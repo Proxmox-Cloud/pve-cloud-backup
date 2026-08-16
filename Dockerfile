@@ -21,6 +21,7 @@ COPY requirements.txt ./
 
 RUN python3 -m venv /opt/fetcher
 
+ARG CACHEBUST
 RUN if [ -n "$LOCAL_PYPI_IP" ]; then \
         echo "Running tdd build"; \
         /opt/fetcher/bin/pip install --upgrade --upgrade-strategy eager --no-cache-dir --index-url http://$LOCAL_PYPI_IP:8088/simple --trusted-host $LOCAL_PYPI_IP -r requirements.txt; \

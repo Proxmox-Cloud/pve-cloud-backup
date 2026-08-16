@@ -20,6 +20,7 @@ from kubernetes.client.rest import ApiException
 from kubernetes.utils.quantity import parse_quantity
 from pve_cloud.lib.backup_rpc import Command
 from tinydb import Query, TinyDB
+from contextlib import asynccontextmanager
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -27,6 +28,7 @@ log_level = getattr(logging, log_level_str, logging.INFO)
 logging.basicConfig(level=log_level)
 logger = logging.getLogger("pxc-restore")
 
+SIO_MAX_RETRIES = 3
 
 # these functions are necessary to convert python k8s naming to camel case
 def to_camel_case(snake_str):
@@ -48,67 +50,86 @@ def convert_keys_to_camel_case(obj):
         return obj
 
 
+@asynccontextmanager
+async def get_direct_conn(restore_args):
+    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    reader, writer = await asyncio.open_connection(
+        restore_args["bdd_host"], 8085, ssl=ssl_ctx
+    )
+    yield reader, writer
+
+    writer.close()
+
+
+@asynccontextmanager
+async def get_sio_conn(restore_args):
+    log_debug = os.getenv("LOG_LEVEL") == "DEBUG"
+    sio = socketio.AsyncClient(logger=log_debug, engineio_logger=log_debug)
+
+    await sio.connect(
+        f"https://{restore_args['mc_gw_host']}",
+        auth={
+            "token": restore_args["mc_ext_token"],
+            "bdd_stack_name": restore_args["bdd_stack_name"],
+        },
+        transports=["websocket"],
+    )
+
+    yield sio
+
+    await sio.disconnect()
+
+
 async def init_procedure_bdd(restore_args):
     if restore_args["use_mc_gw"]:
-        log_debug = os.getenv("LOG_LEVEL") == "DEBUG"
-        sio = socketio.AsyncClient(logger=log_debug, engineio_logger=log_debug)
 
-        await sio.connect(
-            f"https://{restore_args['mc_gw_host']}",
-            auth={
-                "token": restore_args["mc_ext_token"],
-                "bdd_stack_name": restore_args["bdd_stack_name"],
-            },
-            transports=["websocket"],
-        )
-        result_pickled = await sio.call(
-            "init_restore", restore_args["timestamp"], timeout=30
-        )
-        logger.info("init restore result")
-        result = pickle.loads(result_pickled)
-        logger.info(result)
+        async with get_sio_conn(restore_args) as sio:
+            result_pickled = await sio.call(
+                "init_restore", restore_args["timestamp"], timeout=30
+            )
+            logger.info("init restore result")
+            result = pickle.loads(result_pickled)
+            logger.info(result)
 
-        return sio, result["metas_grouped_by_ns"], result["namespace_secret_dict"]
+            return result["metas_grouped_by_ns"], result["namespace_secret_dict"]
 
     else:
-        # connect to the backup server and start the restore procedure
-        # we simply trust the host here as the ca is only available from
-        # postgres secrets
-        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
 
-        reader, writer = await asyncio.open_connection(
-            restore_args["bdd_host"], 8085, ssl=ssl_ctx
-        )
-        writer.write(struct.pack("B", Command.RESTORE_PROCEDURE.value))
-        await writer.drain()
+        async with get_direct_conn(restore_args) as (reader, writer):
+            # connect to the backup server and start the restore procedure
+            # we simply trust the host here as the ca is only available from
+            # postgres secrets
+            writer.write(struct.pack("B", Command.INIT_RESTORE_PROCEDURE.value))
+            await writer.drain()
 
-        # first we send the timestamp and receive our meta information for the restore
-        writer.write((restore_args["timestamp"] + "\n").encode())
-        await writer.drain()
+            # first we send the timestamp and receive our meta information for the restore
+            writer.write((restore_args["timestamp"] + "\n").encode())
+            await writer.drain()
 
-        # read the archives
-        dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-        metas = pickle.loads((await reader.readexactly(dict_size)))
+            # read the archives
+            dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+            metas = pickle.loads((await reader.readexactly(dict_size)))
 
-        metas_grouped_by_ns = {}
+            metas_grouped_by_ns = {}
 
-        for meta in metas:
-            if meta["namespace"] not in metas_grouped_by_ns:
-                metas_grouped_by_ns[meta["namespace"]] = []
+            for meta in metas:
+                if meta["namespace"] not in metas_grouped_by_ns:
+                    metas_grouped_by_ns[meta["namespace"]] = []
 
-            metas_grouped_by_ns[meta["namespace"]].append(meta)
+                metas_grouped_by_ns[meta["namespace"]].append(meta)
 
-        # read the the meta information
-        dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-        stack_meta = pickle.loads((await reader.readexactly(dict_size)))
+            # read the the meta information
+            dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+            stack_meta = pickle.loads((await reader.readexactly(dict_size)))
 
-        namespace_secret_dict = pickle.loads(
-            base64.b64decode(stack_meta["namespace_secret_dict_b64"])
-        )
+            namespace_secret_dict = pickle.loads(
+                base64.b64decode(stack_meta["namespace_secret_dict_b64"])
+            )
 
-        return (reader, writer), metas_grouped_by_ns, namespace_secret_dict
+            return metas_grouped_by_ns, namespace_secret_dict
 
 
 def clean_pvc_dict(pvc_dict):
@@ -175,7 +196,7 @@ async def procedure():
     restore_args = json.loads(base64.b64decode(os.getenv("PXC_RESTORE_ARGS")))
     logger.info(restore_args)
 
-    connection, metas_grouped_by_ns, namespace_secret_dict = await init_procedure_bdd(
+    metas_grouped_by_ns, namespace_secret_dict = await init_procedure_bdd(
         restore_args
     )
 
@@ -466,14 +487,15 @@ async def procedure():
                     # first we create a zvol of identical size
                     # todo: remove -rest stub and replace with new id generation
                     # todo: write converter function to create zvol in exact size like k8s did zfs list -t volume -o name,volsize
-                    cmd = f"sudo zfs create -s -V {parse_quantity(pvc_dict['spec']['resources']['requests']['storage'])} tank-pv/pvc-{restore_pvc_uuid}"
-                    logger.info("Executing create: %s", cmd)
+                    zvol_create_cmd = f"sudo zfs create -s -V {parse_quantity(pvc_dict['spec']['resources']['requests']['storage'])} tank-pv/pvc-{restore_pvc_uuid}"
+                    logger.info("Executing create: %s", zvol_create_cmd)
 
-                    await ssh.run(cmd, check=True)
+                    await ssh.run(zvol_create_cmd, check=True)
 
                     # then we pipe the compressed stream into dd zstd decompression pipeline
+                    import_cmd = f"zstd --decompress --stdout | sudo dd of=/dev/zvol/tank-pv/pvc-{restore_pvc_uuid} bs=4M status=none"
                     proc = await ssh.create_process(
-                        f"zstd --decompress --stdout | sudo dd of=/dev/zvol/tank-pv/pvc-{restore_pvc_uuid} bs=4M status=none",
+                        import_cmd,
                         encoding=None,
                     )
 
@@ -485,45 +507,89 @@ async def procedure():
                     )
 
                     if restore_args["use_mc_gw"]:
-                        await connection.call(
-                            "init_request",
-                            {"archive": request_archive, "artifact": request_artifact},
-                            timeout=30,
-                        )
-                    else:
-                        reader, writer = connection
+                        for attempt in range(1, SIO_MAX_RETRIES + 1):
+                            try:
+                                async with get_sio_conn(restore_args) as sio:
+                                    await sio.call(
+                                        "init_request",
+                                        {"archive": request_archive, "artifact": request_artifact},
+                                        timeout=30,
+                                    )
 
-                        # bdd server does readline()
-                        writer.write(request_archive.encode())
-                        await writer.drain()
+                                    logger.info("send request artifact / archive - requesting chunks")
 
-                        writer.write(request_artifact.encode())
-                        await writer.drain()
+                                    while True:
+                                        chunk = await sio.call("request_chunk", timeout=30)
+                                        if not chunk:
+                                            break
 
-                    logger.info("send request artifact / archive - requesting chunks")
+                                        proc.stdin.write(chunk)
+                                        await proc.stdin.drain()
 
-                    # read compressed chunks
-                    while True:
-                        chunk = None
-                        if restore_args["use_mc_gw"]:
-                            chunk = await connection.call("request_chunk", timeout=30)
-                            if not chunk:
+                                # success
                                 break
-                        else:
-                            reader, writer = connection
 
-                            # client first always sends chunk size
-                            chunk_size = struct.unpack(
-                                "!I", (await reader.readexactly(4))
-                            )[0]
-                            if chunk_size == 0:
-                                logger.debug("received eof")
-                                break  # client sends 0 chunk size at the end to signal that its finished uploading
+                            except socketio.exceptions.TimeoutError:
+                                logger.warn(f"Error on attempt {attempt}")
+                                if attempt == SIO_MAX_RETRIES:
+                                    raise
 
-                            chunk = await reader.readexactly(chunk_size)
+                                # gracefully terminate input pipeline
+                                logger.debug("terminating dd zvol import proc")
+                                proc.terminate()
 
-                        proc.stdin.write(chunk)
-                        await proc.stdin.drain()
+                                try:
+                                    await asyncio.wait_for(proc.wait(), timeout=30)
+                                except asyncio.TimeoutError:
+                                    logger.warning("terminate timed out, force killing import subprocess!")
+                                    proc.kill()
+                                    await proc.wait()
+
+                                # destroy the zfs volume
+                                logger.debug(f"cleaning up zfs vol tank-pv/pvc-{restore_pvc_uuid}")
+                                await ssh.run(f"sudo zfs destroy tank-pv/pvc-{restore_pvc_uuid}")
+
+                                logger.info("Retrying...")
+                                await asyncio.sleep(10)
+
+                                # rerun init commands
+                                # todo: generic retry could make this much learner combining with direct connect
+                                logger.debug("relaunching zvol create cmd")
+                                await ssh.run(zvol_create_cmd, check=True)
+                                proc = await ssh.create_process(
+                                    import_cmd,
+                                    encoding=None,
+                                )
+
+                    else:
+                        async with get_direct_conn(restore_args) as (reader, writer):
+
+                            writer.write(struct.pack("B", Command.REQUEST_ARCHIVE.value))
+                            await writer.drain()
+
+                            # bdd server does readline()
+                            writer.write(request_archive.encode())
+                            await writer.drain()
+
+                            writer.write(request_artifact.encode())
+                            await writer.drain()
+
+                            logger.info("send request artifact / archive - requesting chunks")
+
+                            while True:
+                                # client first always sends chunk size
+                                chunk_size = struct.unpack(
+                                    "!I", (await reader.readexactly(4))
+                                )[0]
+                                if chunk_size == 0:
+                                    logger.debug("received eof")
+                                    break  # client sends 0 chunk size at the end to signal that its finished uploading
+
+                                chunk = await reader.readexactly(chunk_size)
+
+                                proc.stdin.write(chunk)
+                                await proc.stdin.drain()
+
 
                     logger.info("done reading closing proc")
                     proc.stdin.close()
@@ -659,22 +725,6 @@ async def procedure():
                     f"requesting borg archive stream from bdd {request_archive} - {request_artifact} into rbd import {pool}/{new_csi_image_name}"
                 )
 
-                if restore_args["use_mc_gw"]:
-                    await connection.call(
-                        "init_request",
-                        {"archive": request_archive, "artifact": request_artifact},
-                        timeout=30,
-                    )
-                else:
-                    reader, writer = connection
-
-                    # bdd server does readline()
-                    writer.write(request_archive.encode())
-                    await writer.drain()
-
-                    writer.write(request_artifact.encode())
-                    await writer.drain()
-
                 # pipe the resulting stream into rbd import
                 rbd_import_proc = await asyncio.create_subprocess_exec(
                     "rbd",
@@ -684,32 +734,99 @@ async def procedure():
                     stdin=asyncio.subprocess.PIPE,
                 )
 
-                # read compressed chunks
-                decompressor = zstd.ZstdDecompressor().decompressobj()
-                while True:
-                    chunk = None
-                    if restore_args["use_mc_gw"]:
-                        chunk = await connection.call("request_chunk", timeout=30)
-                        if not chunk:
+                if restore_args["use_mc_gw"]:
+                    for attempt in range(1, SIO_MAX_RETRIES + 1):
+                        try:
+                            async with get_sio_conn(restore_args) as sio:
+                                await sio.call(
+                                    "init_request",
+                                    {"archive": request_archive, "artifact": request_artifact},
+                                    timeout=30,
+                                )
+                                # read compressed chunks
+                                decompressor = zstd.ZstdDecompressor().decompressobj()
+                                while True:
+                                    chunk = await sio.call("request_chunk", timeout=30)
+                                    if not chunk:
+                                        break
+
+                                    # decompress and write
+                                    decompressed_chunk = decompressor.decompress(chunk)
+                                    if decompressed_chunk:
+                                        rbd_import_proc.stdin.write(decompressed_chunk)
+                                        await rbd_import_proc.stdin.drain()
+
+                            # success
                             break
-                    else:
-                        reader, writer = connection
 
-                        # client first always sends chunk size
-                        chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[
-                            0
-                        ]
-                        if chunk_size == 0:
-                            logger.debug("received eof")
-                            break  # client sends 0 chunk size at the end to signal that its finished uploading
+                        except socketio.exceptions.TimeoutError:
+                            logger.warn(f"Error on attempt {attempt}")
+                            if attempt == SIO_MAX_RETRIES:
+                                raise
 
-                        chunk = await reader.readexactly(chunk_size)
+                            # gracefully terminate input pipeline
+                            logger.debug("terminating rbd import proc")
+                            rbd_import_proc.terminate()
 
-                    # decompress and write
-                    decompressed_chunk = decompressor.decompress(chunk)
-                    if decompressed_chunk:
-                        rbd_import_proc.stdin.write(decompressed_chunk)
-                        await rbd_import_proc.stdin.drain()
+                            try:
+                                await asyncio.wait_for(rbd_import_proc.wait(), timeout=30)
+                            except asyncio.TimeoutError:
+                                logger.warning("terminate timed out, force killing import subprocess!")
+                                rbd_import_proc.kill()
+                                await rbd_import_proc.wait()
+
+                            # destroy the rbd image
+                            logger.debug(f"cleanup rbd image {pool}/{new_csi_image_name}")
+                            await asyncio.create_subprocess_exec(
+                                "rbd",
+                                "rm",
+                                f"{pool}/{new_csi_image_name}",
+                            )
+
+                            logger.info("Retrying...")
+                            await asyncio.sleep(10)
+
+                            # rerun init commands
+                            # todo: generic retry could make this much learner combining with direct connect
+                            rbd_import_proc = await asyncio.create_subprocess_exec(
+                                "rbd",
+                                "import",
+                                "-",
+                                f"{pool}/{new_csi_image_name}",
+                                stdin=asyncio.subprocess.PIPE,
+                            )
+
+                else:
+                    async with get_direct_conn(restore_args) as (reader, writer):
+
+                        writer.write(struct.pack("B", Command.REQUEST_ARCHIVE.value))
+                        await writer.drain()
+
+                        # bdd server does readline()
+                        writer.write(request_archive.encode())
+                        await writer.drain()
+
+                        writer.write(request_artifact.encode())
+                        await writer.drain()
+
+                        # read compressed chunks
+                        decompressor = zstd.ZstdDecompressor().decompressobj()
+                        while True:
+                            # client first always sends chunk size
+                            chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[
+                                0
+                            ]
+                            if chunk_size == 0:
+                                logger.debug("received eof")
+                                break  # client sends 0 chunk size at the end to signal that its finished uploading
+
+                            chunk = await reader.readexactly(chunk_size)
+
+                            # decompress and write
+                            decompressed_chunk = decompressor.decompress(chunk)
+                            if decompressed_chunk:
+                                rbd_import_proc.stdin.write(decompressed_chunk)
+                                await rbd_import_proc.stdin.drain()
 
                 # the decompressor does not always return a decompressed chunk but might retain
                 # and return empty. at the end we need to call flush to get everything out
@@ -835,20 +952,6 @@ async def procedure():
                     )
                 )
 
-        if restore_args["use_mc_gw"]:
-            await connection.call("request_done", timeout=30)
-
-            await connection.disconnect()
-
-        else:
-            reader, writer = connection
-
-            # send the done signal to bdd server
-            writer.write("##BRCTL-DONE\n".encode())
-            await writer.drain()
-
-            # close the writer here
-            writer.close()
 
         # scale back up again
         if restore_args["auto_scale"]:

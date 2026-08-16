@@ -67,6 +67,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                 # send ping pong while waiting on lock
                 # maybe this is also needed in other rpc call types
+                # todo: currently this is the most likely point where a disconnect might happen
+                # this connection here is by far the longest running. It would however be nice that
+                # the entire app has retries for connects and can handle connection outages well.
+                # implement something like toxiproxy in e2e testing and make resilient.
                 lock = await get_lock(backup_dir)
                 # store ref to kill in case of failure => this will stop the archive from being committet
                 borg_proc = None
@@ -106,12 +110,18 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     )
 
                     # read compressed chunks
+                    dbg_chunk_count = 0
+
                     while True:
                         # client first always sends chunk size
                         chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[
                             0
                         ]
-                        logger.debug(f"received chunk size {chunk_size}")
+
+                        # log chunk size on every 100th chunk in dbg log level
+                        dbg_chunk_count += 1
+                        if dbg_chunk_count % 100 == 0:
+                            logger.debug(f"received chunk size {chunk_size}")
 
                         if chunk_size == 0:
                             logger.debug("received chunk size 0, finished")
@@ -149,6 +159,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     )
 
                     if borg_proc:
+                        logger.info("terminating borg process")
                         borg_proc.terminate()
 
                         try:
@@ -160,7 +171,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                             borg_proc.kill()
                             await borg_proc.wait()
 
-                        # cleanup repo
+                        logger.debug(f"cleaning up borg repo {borg_archive}")
                         await asyncio.create_subprocess_exec(
                             "borg",
                             "delete",
@@ -237,12 +248,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 async with lock:
                     secret_db = TinyDB(db_path)
 
-                while True:
-                    # listen for secret requests
                     stack = (await reader.readline()).decode().rstrip("\n")
-
-                    if stack == "##BRCTL-DONE":
-                        break  # done signal
 
                     Meta = Query()
                     ns_secrets = secret_db.get(
@@ -256,7 +262,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     writer.write(meta_pickled)
                     await writer.drain()
 
-            case Command.RESTORE_PROCEDURE:
+            case Command.INIT_RESTORE_PROCEDURE:
                 timestamp = (await reader.readline()).decode().rstrip("\n")
                 logger.info(timestamp)
 
@@ -298,53 +304,52 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     writer.write(meta_pickled)
                     await writer.drain()
 
-                logger.info(
-                    "send initial config / secrets - waiting for archive requests"
-                )
+                    logger.info(
+                        "send initial config / secrets - waiting for archive requests"
+                    )
+
+            case Command.REQUEST_ARCHIVE:
                 # next the client requests the archives which we extract here and pipe via a stream
-                while True:
-                    # open the extract process and send the stream the output
-                    request_archive = (await reader.readline()).decode().rstrip("\n")
-                    logger.info(request_archive)
+                # open the extract process and send the stream the output
+                request_archive = (await reader.readline()).decode().rstrip("\n")
+                logger.info(request_archive)
 
-                    if request_archive == "##BRCTL-DONE":
-                        break  # done signal
+                request_artifact = (await reader.readline()).decode().rstrip("\n")
+                logger.info(request_artifact)
 
-                    request_artifact = (await reader.readline()).decode().rstrip("\n")
-                    logger.info(request_artifact)
+                backup_dir = f"{get_backup_base_dir()}/{request_archive}"
+                lock = await get_lock(backup_dir)
+                async with lock:
+                    logger.info(
+                        f"running borg extract on {backup_dir}::{request_artifact}"
+                    )
+                    proc = await asyncio.create_subprocess_exec(
+                        "borg",
+                        "extract",
+                        "--sparse",
+                        "--stdout",
+                        f"{backup_dir}::{request_artifact}",
+                        stdout=asyncio.subprocess.PIPE,
+                    )
 
-                    backup_dir = f"{get_backup_base_dir()}/{request_archive}"
-                    lock = await get_lock(backup_dir)
-                    async with lock:
-                        logger.info(
-                            f"running borg extract on {backup_dir}::{request_artifact}"
-                        )
-                        proc = await asyncio.create_subprocess_exec(
-                            "borg",
-                            "extract",
-                            "--sparse",
-                            "--stdout",
-                            f"{backup_dir}::{request_artifact}",
-                            stdout=asyncio.subprocess.PIPE,
-                        )
+                    compressor = zstd.ZstdCompressor(
+                        level=1, threads=6
+                    ).compressobj()
+                    while True:
+                        chunk = await proc.stdout.read(4 * 1024 * 1024 * 10)  # 4MB
+                        if not chunk:
+                            break
 
-                        compressor = zstd.ZstdCompressor(
-                            level=1, threads=6
-                        ).compressobj()
-                        while True:
-                            chunk = await proc.stdout.read(4 * 1024 * 1024 * 10)  # 4MB
-                            if not chunk:
-                                break
+                        # compress and send the chunk
+                        await send_cchunk(writer, compressor.compress(chunk))
 
-                            # compress and send the chunk
-                            await send_cchunk(writer, compressor.compress(chunk))
+                    # send the rest in the compressor
+                    await send_cchunk(writer, compressor.flush())
 
-                        # send the rest in the compressor
-                        await send_cchunk(writer, compressor.flush())
+                    logger.info("sending eof")
+                    writer.write(struct.pack("!I", 0))
+                    await writer.drain()
 
-                        logger.info("sending eof")
-                        writer.write(struct.pack("!I", 0))
-                        await writer.drain()
 
     except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError) as e:
         logger.warning("Client disconnected: %s", e, exc_info=True)

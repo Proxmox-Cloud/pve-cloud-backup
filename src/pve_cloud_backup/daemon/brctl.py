@@ -128,11 +128,6 @@ async def list_backup_details_remote(args):
             dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
             stack_meta = pickle.loads((await reader.readexactly(dict_size)))
 
-            # send a terminator
-            # todo: probably not needed anymore
-            writer.write("##BRCTL-DONE\n".encode())
-            await writer.drain()
-
         namespace_secret_dict = pickle.loads(
             base64.b64decode(stack_meta["namespace_secret_dict_b64"])
         )

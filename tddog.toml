@@ -2,6 +2,7 @@
 build_commands = [
   [
     "docker", "build", "--build-arg", "LOCAL_PYPI_IP=$REGISTRY_IP",
+    "--build-arg", "CACHEBUST=$VERSION",
     ".", "-t", "$REGISTRY_IP:5000/pve-cloud-backup:$VERSION"
   ],
   [

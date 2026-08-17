@@ -19,7 +19,7 @@ from kubernetes.client import (ApiException, V1ConfigMapVolumeSource,
 from kubernetes.config.kube_config import KubeConfigLoader
 from pve_cloud.cli.pvclu import (get_cloud_domain, get_ssh_master_kubeconfig,
                                  get_ssh_remote_master_kubeconfig)
-from pve_cloud.cli.pxrpc import launch_pxrpc
+from pve_cloud.cli.pxrpc import launch_pxrpc, get_simple_pxrpc
 from pve_cloud.lib.backup_rpc import Command
 from pve_cloud.lib.inventory import (get_cloud_domain, get_cluster_vars,
                                      get_online_pve_host,
@@ -55,10 +55,10 @@ async def list_backup_details_remote(args):
     metas = None
     stack_meta = None
 
-    with launch_pxrpc(jump_host, pve_host) as (pxrpc, pve_host_conn):
+    async with get_simple_pxrpc(pve_host, jump_host) as pxrpc:
         if args.use_mc_gw:
             # we will create a socket connection to the multi cloud gateway for that we need to fetch secrets
-            ext_mc_raw = pxrpc.get_cloud_secret(cloud_domain, "external-mc-token")
+            ext_mc_raw = await pxrpc.get_cloud_secret(cloud_domain, "external-mc-token")
             if not ext_mc_raw:
                 raise RuntimeError(
                     f"No multi cloud services could be discovered for {pve_cluster} - {cloud_domain}!"
@@ -85,7 +85,7 @@ async def list_backup_details_remote(args):
             # we will connect directly to the backup server
             # todo: here we can also pass the correct tls config
 
-            tls_disc_raw = pxrpc.get_cloud_secret(
+            tls_disc_raw = await pxrpc.get_cloud_secret(
                 cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery"
             )
             if not tls_disc_raw:
@@ -208,9 +208,9 @@ async def list_backups_remote(args):
     logger.info(f"connecting to {pve_host} via {jump_host}")
     archives = None
 
-    with launch_pxrpc(jump_host, pve_host) as (pxrpc, pve_host_conn):
+    async with get_simple_pxrpc(pve_host, jump_host) as pxrpc:
         if args.use_mc_gw:
-            ext_mc_raw = pxrpc.get_cloud_secret(cloud_domain, "external-mc-token")
+            ext_mc_raw = await pxrpc.get_cloud_secret(cloud_domain, "external-mc-token")
             if not ext_mc_raw:
                 raise RuntimeError(
                     f"No multi cloud services could be discovered for {pve_cluster} - {cloud_domain}!"
@@ -234,7 +234,7 @@ async def list_backups_remote(args):
             archives = result["archives"]
 
         else:
-            tls_disc_raw = pxrpc.get_cloud_secret(
+            tls_disc_raw = await pxrpc.get_cloud_secret(
                 cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery"
             )
             if not tls_disc_raw:
@@ -294,6 +294,7 @@ async def launch_restore_job(args):
 
     kubeconfig_dict = None
 
+    # todo: maybe this can be simplyfied relying more heavily on pxrpc.get_simple_pxrpc concepts
     if raw_pxc_inv["plugin"] == "pxc.cloud.kubespray_inv":
         kubespray_inv = raw_pxc_inv
 
@@ -363,9 +364,9 @@ async def launch_restore_job(args):
     # acessing the backup server
     logger.info(f"connecting to {pve_host} via {jump_host}")
 
-    with launch_pxrpc(jump_host, pve_host) as (pxrpc, pve_host_conn):
+    async with get_simple_pxrpc(pve_host, jump_host) as pxrpc:
         if args.use_mc_gw:
-            ext_mc_raw = pxrpc.get_cloud_secret(cloud_domain, "external-mc-token")
+            ext_mc_raw = await pxrpc.get_cloud_secret(cloud_domain, "external-mc-token")
             if not ext_mc_raw:
                 raise RuntimeError(
                     f"No multi cloud services could be discovered for {pve_cluster} - {cloud_domain}!"
@@ -379,7 +380,7 @@ async def launch_restore_job(args):
             serializable_args["bdd_stack_name"] = bdd_stack_name
 
         else:
-            tls_disc_raw = pxrpc.get_cloud_secret(
+            tls_disc_raw = await pxrpc.get_cloud_secret(
                 cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery"
             )
             if not tls_disc_raw:

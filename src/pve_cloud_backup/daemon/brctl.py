@@ -19,7 +19,7 @@ from kubernetes.client import (ApiException, V1ConfigMapVolumeSource,
 from kubernetes.config.kube_config import KubeConfigLoader
 from pve_cloud.cli.pvclu import (get_cloud_domain, get_ssh_master_kubeconfig,
                                  get_ssh_remote_master_kubeconfig)
-from pve_cloud.cli.pxrpc import launch_pxrpc, get_simple_pxrpc
+from pve_cloud.cli.pxrpc import get_simple_pxrpc, launch_pxrpc
 from pve_cloud.lib.backup_rpc import Command
 from pve_cloud.lib.inventory import (get_cloud_domain, get_cluster_vars,
                                      get_online_pve_host,

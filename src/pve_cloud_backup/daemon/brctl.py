@@ -272,6 +272,7 @@ async def launch_restore_job(args):
     serializable_args = vars(args).copy()
     serializable_args["func"] = args.func.__name__
 
+    # load and validate input target inventory
     with open(args.inventory, "r") as file:
         raw_pxc_inv = yaml.safe_load(file)
 
@@ -292,6 +293,8 @@ async def launch_restore_job(args):
                 "Unsuitable ext_hosts_inv passed! Needs k0s_edge typed host group."
             )
 
+    # connect to the target clusters cloud and fetch access credentials to
+    # the k8s system
     kubeconfig_dict = None
 
     # todo: maybe this can be simplyfied relying more heavily on pxrpc.get_simple_pxrpc concepts

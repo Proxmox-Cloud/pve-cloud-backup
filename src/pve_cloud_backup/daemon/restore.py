@@ -553,16 +553,20 @@ async def procedure():
                                     proc.kill()
                                     await proc.wait()
 
+                                logger.info("Retrying...")
+                                await asyncio.sleep(10)
+
                                 # destroy the zfs volume
                                 logger.debug(
                                     f"cleaning up zfs vol tank-pv/pvc-{restore_pvc_uuid}"
                                 )
-                                await ssh.run(
+                                cleanup_proc = await ssh.run(
                                     f"sudo zfs destroy tank-pv/pvc-{restore_pvc_uuid}"
                                 )
 
-                                logger.info("Retrying...")
-                                await asyncio.sleep(10)
+                                await cleanup_proc.wait()
+
+                                logger.debug(f"cleanup retcode {cleanup_proc.returncode}")
 
                                 # rerun init commands
                                 # todo: generic retry could make this much learner combining with direct connect
@@ -798,17 +802,21 @@ async def procedure():
                                 await rbd_import_proc.wait()
 
                             # destroy the rbd image
+                            logger.info("Retrying...")
+                            await asyncio.sleep(10)
+
                             logger.debug(
                                 f"cleanup rbd image {pool}/{new_csi_image_name}"
                             )
-                            await asyncio.create_subprocess_exec(
+                            cleanup_proc = await asyncio.create_subprocess_exec(
                                 "rbd",
                                 "rm",
                                 f"{pool}/{new_csi_image_name}",
                             )
 
-                            logger.info("Retrying...")
-                            await asyncio.sleep(10)
+                            await cleanup_proc.wait()
+
+                            logger.debug(f"cleanup retcode {cleanup_proc.returncode}")
 
                             # rerun init commands
                             # todo: generic retry could make this much learner combining with direct connect

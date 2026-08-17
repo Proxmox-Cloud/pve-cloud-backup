@@ -566,7 +566,9 @@ async def procedure():
 
                                 await cleanup_proc.wait()
 
-                                logger.debug(f"cleanup retcode {cleanup_proc.returncode}")
+                                logger.debug(
+                                    f"cleanup retcode {cleanup_proc.returncode}"
+                                )
 
                                 # rerun init commands
                                 # todo: generic retry could make this much learner combining with direct connect

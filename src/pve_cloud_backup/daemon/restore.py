@@ -68,7 +68,7 @@ async def get_direct_conn(restore_args):
 @asynccontextmanager
 async def get_sio_conn(restore_args):
     log_debug = os.getenv("LOG_LEVEL") == "DEBUG"
-    sio = socketio.AsyncClient(logger=log_debug, engineio_logger=log_debug)
+    sio = socketio.AsyncClient() #(logger=log_debug, engineio_logger=log_debug)
 
     await sio.connect(
         f"https://{restore_args['mc_gw_host']}",

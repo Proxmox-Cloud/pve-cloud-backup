@@ -332,14 +332,21 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         stdout=asyncio.subprocess.PIPE,
                     )
 
+                    dbg_chunk_count = 0
                     compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
                     while True:
                         chunk = await proc.stdout.read(4 * 1024 * 1024 * 10)  # 4MB
                         if not chunk:
                             break
 
+                        cchunk = compressor.compress(chunk)
+
+                        dbg_chunk_count += 1
+                        if dbg_chunk_count % 100 == 0:
+                            logger.debug(f"sending chunk size {len(cchunk)}")
+
                         # compress and send the chunk
-                        await send_cchunk(writer, compressor.compress(chunk))
+                        await send_cchunk(writer, cchunk)
 
                     # send the rest in the compressor
                     await send_cchunk(writer, compressor.flush())

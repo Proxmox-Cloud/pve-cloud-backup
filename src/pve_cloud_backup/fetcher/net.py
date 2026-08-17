@@ -73,7 +73,7 @@ async def get_sio_mc_client(backup_addr):
         )
 
     log_debug = os.getenv("LOG_LEVEL") == "DEBUG"
-    sio = socketio.AsyncClient() # (logger=log_debug, engineio_logger=log_debug)
+    sio = socketio.AsyncClient()  # (logger=log_debug, engineio_logger=log_debug)
 
     await sio.connect(
         backup_addr,

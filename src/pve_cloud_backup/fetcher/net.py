@@ -70,7 +70,6 @@ async def send_cchunk(writer, reader, compressed_chunk):
             raise RuntimeError("Expected x01 ack byte!")
 
 
-
 async def get_sio_mc_client(backup_addr):
     if not os.getenv("MC_EXT_TOKEN"):
         raise RuntimeError(

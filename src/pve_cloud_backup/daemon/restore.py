@@ -616,7 +616,6 @@ async def procedure():
                                 proc.stdin.write(chunk)
                                 await proc.stdin.drain()
 
-
                     logger.info("done reading closing proc")
                     proc.stdin.close()
                     await proc.wait()

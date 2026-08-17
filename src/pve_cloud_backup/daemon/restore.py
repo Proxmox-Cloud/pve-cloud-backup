@@ -609,8 +609,13 @@ async def procedure():
 
                                 chunk = await reader.readexactly(chunk_size)
 
+                                # send ack
+                                writer.write(b"\x01")
+                                await writer.drain()
+
                                 proc.stdin.write(chunk)
                                 await proc.stdin.drain()
+
 
                     logger.info("done reading closing proc")
                     proc.stdin.close()
@@ -855,6 +860,10 @@ async def procedure():
                                 break  # client sends 0 chunk size at the end to signal that its finished uploading
 
                             chunk = await reader.readexactly(chunk_size)
+
+                            # send ack
+                            writer.write(b"\x01")
+                            await writer.drain()
 
                             # decompress and write
                             decompressed_chunk = decompressor.decompress(chunk)

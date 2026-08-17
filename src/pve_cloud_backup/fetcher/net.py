@@ -56,7 +56,7 @@ async def archive_init(reader, writer, request_dict):
     logger.debug("received go")
 
 
-async def send_cchunk(writer, compressed_chunk):
+async def send_cchunk(writer, reader, compressed_chunk):
     # compress the chunk
     if compressed_chunk:  # only send if something actually got compressed
         # send size + chunk
@@ -64,6 +64,11 @@ async def send_cchunk(writer, compressed_chunk):
         await writer.drain()
         writer.write(compressed_chunk)
         await writer.drain()
+
+        ack = await reader.readexactly(1)
+        if ack != b"\x01":
+            raise RuntimeError("Expected x01 ack byte!")
+
 
 
 async def get_sio_mc_client(backup_addr):
@@ -181,10 +186,10 @@ async def archive_async(backup_addr, request_dict, chunk_generator, compress=Tru
         if compress:
             compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
             async for chunk in chunk_generator():
-                await send_cchunk(writer, compressor.compress(chunk))
+                await send_cchunk(writer, reader, compressor.compress(chunk))
             # send rest in compressor, compress doesnt always return a byte array, see bdd.py doc
             # send size first again
-            await send_cchunk(writer, compressor.flush())
+            await send_cchunk(writer, reader, compressor.flush())
 
         else:
             async for chunk in chunk_generator():
@@ -234,11 +239,11 @@ async def archive(backup_addr, request_dict, chunk_generator):
         # compressor = zlib.compressobj(level=1)
         compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
         for chunk in chunk_generator():
-            await send_cchunk(writer, compressor.compress(chunk))
+            await send_cchunk(writer, reader, compressor.compress(chunk))
 
         # send rest in compressor, compress doesnt always return a byte array, see bdd.py doc
         # send size first again
-        await send_cchunk(writer, compressor.flush())
+        await send_cchunk(writer, reader, compressor.flush())
 
         # send eof to server, signal that we are done
         logger.debug("sending eof")

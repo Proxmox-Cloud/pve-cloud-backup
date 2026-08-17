@@ -112,6 +112,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     # read compressed chunks
                     dbg_chunk_count = 0
 
+                    # todo: this also needs acks?
                     while True:
                         # client first always sends chunk size
                         chunk_size = struct.unpack("!I", (await reader.readexactly(4)))[
@@ -126,7 +127,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         if chunk_size == 0:
                             logger.debug("received chunk size 0, finished")
                             break  # client sends 0 chunk size at the end to signal that its finished uploading
+
                         chunk = await reader.readexactly(chunk_size)
+
+                        # send ack
+                        writer.write(b"\x01")
+                        await writer.drain()
 
                         # decompress and write
                         decompressed_chunk = decompressor.decompress(chunk)
@@ -341,15 +347,18 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                         cchunk = compressor.compress(chunk)
 
-                        dbg_chunk_count += 1
-                        if dbg_chunk_count % 100 == 0:
-                            logger.debug(f"sending chunk size {len(cchunk)}")
+                        # debug friendly send trace
+                        if cchunk:
+                            dbg_chunk_count += 1
+
+                            if dbg_chunk_count % 100 == 0:
+                                logger.debug(f"sending chunk size {len(cchunk)}")
 
                         # compress and send the chunk
-                        await send_cchunk(writer, cchunk)
+                        await send_cchunk(writer, reader, cchunk)
 
                     # send the rest in the compressor
-                    await send_cchunk(writer, compressor.flush())
+                    await send_cchunk(writer, reader, compressor.flush())
 
                     logger.info("sending eof")
                     writer.write(struct.pack("!I", 0))

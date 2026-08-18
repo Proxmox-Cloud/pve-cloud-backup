@@ -128,7 +128,7 @@ async def wait_archive_init(sio, request_dict):
 # the receiving side ALWAYS expects a compressed stream
 async def archive(backup_addr, request_dict, chunk_generator, compress=True):
     logger.info("sending archive request: %s", request_dict)
-    logger.debug("generator async: %s", inspect.isasyncgen(chunk_generator))
+    logger.debug("generator async: %s", inspect.isasyncgenfunction(chunk_generator))
 
     # we assume that we are sending to a multicloud gateway if the addr starts with https://
     # direct connects via tcp are if the backup_addr is a hostname / ip address
@@ -149,7 +149,7 @@ async def archive(backup_addr, request_dict, chunk_generator, compress=True):
                         threads=6,
                     ).compressobj()
 
-                    if inspect.isasyncgen(chunk_generator):
+                    if inspect.isasyncgenfunction(chunk_generator):
                         async for chunk in chunk_generator():
                             await sio_send_cchunk(sio, compressor.compress(chunk))
                     else:
@@ -159,7 +159,7 @@ async def archive(backup_addr, request_dict, chunk_generator, compress=True):
                     await sio_send_cchunk(sio, compressor.flush())
 
                 else:
-                    if inspect.isasyncgen(chunk_generator):
+                    if inspect.isasyncgenfunction(chunk_generator):
                         async for chunk in chunk_generator():
                             await sio.call("backup_chunk", chunk)
                     else:
@@ -196,7 +196,7 @@ async def archive(backup_addr, request_dict, chunk_generator, compress=True):
         # compressor = zlib.compressobj(level=1)
         if compress:
             compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
-            if inspect.isasyncgen(chunk_generator):
+            if inspect.isasyncgenfunction(chunk_generator):
                 async for chunk in chunk_generator():
                     await send_cchunk(writer, reader, compressor.compress(chunk))
             else:
@@ -208,7 +208,7 @@ async def archive(backup_addr, request_dict, chunk_generator, compress=True):
             await send_cchunk(writer, reader, compressor.flush())
 
         else:
-            if inspect.isasyncgen(chunk_generator):
+            if inspect.isasyncgenfunction(chunk_generator):
                 async for chunk in chunk_generator():
                     writer.write(struct.pack("!I", len(chunk)))
                     await writer.drain()

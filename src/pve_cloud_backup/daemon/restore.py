@@ -13,14 +13,12 @@ from contextlib import asynccontextmanager
 from pprint import pformat
 
 import asyncssh
-import paramiko
 import socketio
 import zstandard as zstd
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 from kubernetes.utils.quantity import parse_quantity
 from pve_cloud.lib.backup_rpc import Command
-from tinydb import Query, TinyDB
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -51,6 +49,7 @@ def convert_keys_to_camel_case(obj):
         return obj
 
 
+# connection helpers to either gateway or server directory
 @asynccontextmanager
 async def get_direct_conn(restore_args):
     ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -67,8 +66,7 @@ async def get_direct_conn(restore_args):
 
 @asynccontextmanager
 async def get_sio_conn(restore_args):
-    log_debug = os.getenv("LOG_LEVEL") == "DEBUG"
-    sio = socketio.AsyncClient()  # (logger=log_debug, engineio_logger=log_debug)
+    sio = socketio.AsyncClient()
 
     await sio.connect(
         f"https://{restore_args['mc_gw_host']}",
@@ -86,7 +84,6 @@ async def get_sio_conn(restore_args):
 
 async def init_procedure_bdd(restore_args):
     if restore_args["use_mc_gw"]:
-
         async with get_sio_conn(restore_args) as sio:
             result_pickled = await sio.call(
                 "init_restore", restore_args["timestamp"], timeout=30
@@ -98,7 +95,6 @@ async def init_procedure_bdd(restore_args):
             return result["metas_grouped_by_ns"], result["namespace_secret_dict"]
 
     else:
-
         async with get_direct_conn(restore_args) as (reader, writer):
             # connect to the backup server and start the restore procedure
             # we simply trust the host here as the ca is only available from
@@ -483,9 +479,8 @@ async def procedure():
                     known_hosts=None,
                 ) as ssh:
                     restore_pvc_uuid = str(uuid.uuid4())
+
                     # first we create a zvol of identical size
-                    # todo: remove -rest stub and replace with new id generation
-                    # todo: write converter function to create zvol in exact size like k8s did zfs list -t volume -o name,volsize
                     zvol_create_cmd = f"sudo zfs create -s -V {parse_quantity(pvc_dict['spec']['resources']['requests']['storage'])} tank-pv/pvc-{restore_pvc_uuid}"
                     logger.info("Executing create: %s", zvol_create_cmd)
 
@@ -506,6 +501,7 @@ async def procedure():
                     )
 
                     if restore_args["use_mc_gw"]:
+                        # retry mechanism for more instable remote restore procedure via the gateway
                         for attempt in range(1, SIO_MAX_RETRIES + 1):
                             try:
                                 async with get_sio_conn(restore_args) as sio:
@@ -516,10 +512,6 @@ async def procedure():
                                             "artifact": request_artifact,
                                         },
                                         timeout=30,
-                                    )
-
-                                    logger.info(
-                                        "send request artifact / archive - requesting chunks"
                                     )
 
                                     while True:
@@ -540,8 +532,9 @@ async def procedure():
                                 if attempt == SIO_MAX_RETRIES:
                                     raise
 
+                                logger.info("Retrying...")
+
                                 # gracefully terminate input pipeline
-                                logger.debug("terminating dd zvol import proc")
                                 proc.terminate()
 
                                 try:
@@ -553,27 +546,21 @@ async def procedure():
                                     proc.kill()
                                     await proc.wait()
 
-                                logger.info("Retrying...")
+                                # wait before retrying
                                 await asyncio.sleep(10)
 
-                                # destroy the zfs volume
-                                logger.debug(
-                                    f"cleaning up zfs vol tank-pv/pvc-{restore_pvc_uuid}"
-                                )
                                 cleanup_proc = await ssh.run(
                                     f"sudo zfs destroy tank-pv/pvc-{restore_pvc_uuid}"
                                 )
 
                                 await cleanup_proc.wait()
-
                                 logger.debug(
                                     f"cleanup retcode {cleanup_proc.returncode}"
                                 )
 
                                 # rerun init commands
-                                # todo: generic retry could make this much learner combining with direct connect
+                                # todo: generic retry could make this much cleaner combining with direct connect
                                 logger.debug("relaunching zvol create cmd")
-                                await ssh.run(zvol_create_cmd, check=True)
                                 proc = await ssh.create_process(
                                     import_cmd,
                                     encoding=None,
@@ -581,7 +568,6 @@ async def procedure():
 
                     else:
                         async with get_direct_conn(restore_args) as (reader, writer):
-
                             writer.write(
                                 struct.pack("B", Command.REQUEST_ARCHIVE.value)
                             )
@@ -593,10 +579,6 @@ async def procedure():
 
                             writer.write(request_artifact.encode())
                             await writer.drain()
-
-                            logger.info(
-                                "send request artifact / archive - requesting chunks"
-                            )
 
                             while True:
                                 # client first always sends chunk size
@@ -616,7 +598,7 @@ async def procedure():
                                 proc.stdin.write(chunk)
                                 await proc.stdin.drain()
 
-                    logger.info("done reading closing proc")
+                    # close the process regularly
                     proc.stdin.close()
                     await proc.wait()
 
@@ -739,7 +721,6 @@ async def procedure():
                     )
 
             elif target_provisioner == "rbd.csi.ceph.com":
-
                 new_csi_image_name = f"csi-vol-{uuid.uuid4()}"
 
                 # send to the bdd server what we want to request
@@ -760,6 +741,7 @@ async def procedure():
                 )
 
                 if restore_args["use_mc_gw"]:
+                    # retry mechanism for more instable remote restore procedures via multi cloud gateway
                     for attempt in range(1, SIO_MAX_RETRIES + 1):
                         try:
                             async with get_sio_conn(restore_args) as sio:
@@ -792,8 +774,9 @@ async def procedure():
                             if attempt == SIO_MAX_RETRIES:
                                 raise
 
+                            logger.info("retrying...")
+
                             # gracefully terminate input pipeline
-                            logger.debug("terminating rbd import proc")
                             rbd_import_proc.terminate()
 
                             try:
@@ -808,12 +791,8 @@ async def procedure():
                                 await rbd_import_proc.wait()
 
                             # destroy the rbd image
-                            logger.info("Retrying...")
                             await asyncio.sleep(10)
 
-                            logger.debug(
-                                f"cleanup rbd image {pool}/{new_csi_image_name}"
-                            )
                             cleanup_proc = await asyncio.create_subprocess_exec(
                                 "rbd",
                                 "rm",
@@ -821,7 +800,6 @@ async def procedure():
                             )
 
                             await cleanup_proc.wait()
-
                             logger.debug(f"cleanup retcode {cleanup_proc.returncode}")
 
                             # rerun init commands
@@ -836,7 +814,6 @@ async def procedure():
 
                 else:
                     async with get_direct_conn(restore_args) as (reader, writer):
-
                         writer.write(struct.pack("B", Command.REQUEST_ARCHIVE.value))
                         await writer.drain()
 

@@ -72,6 +72,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 # the entire app has retries for connects and can handle connection outages well.
                 # implement something like toxiproxy in e2e testing and make resilient.
                 lock = await get_lock(backup_dir)
+
                 # store ref to kill in case of failure => this will stop the archive from being committet
                 borg_proc = None
                 borg_archive = f"{backup_dir}::{archive_name}_{timestamp}"
@@ -142,7 +143,6 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                     # the decompressor does not always return a decompressed chunk but might retain
                     # and return empty. at the end we need to call flush to get everything out
-                    logger.debug("flushing, draining and closing")
                     borg_proc.stdin.write(decompressor.flush())
                     await borg_proc.stdin.drain()
 
@@ -159,13 +159,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     BrokenPipeError,
                 ) as e:
                     logger.warning(
-                        "Client error on transmission: %s, gracefully terminating borg...",
+                        "Client error on transmission: %s",
                         e,
                         exc_info=True,
                     )
 
                     if borg_proc:
-                        logger.info("terminating borg process")
                         borg_proc.terminate()
 
                         try:
@@ -183,6 +182,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                             "delete",
                             borg_archive,
                         )
+
                     # reraise exception for main close handler
                     raise
                 finally:
@@ -226,7 +226,6 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                 writer.write(archives_pickled)
                 await writer.drain()
-                logger.debug("send archives")
 
             case Command.LIST_BACKUP_DETAILS:
                 timestamp = (await reader.readline()).decode().rstrip("\n")
@@ -270,7 +269,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
             case Command.INIT_RESTORE_PROCEDURE:
                 timestamp = (await reader.readline()).decode().rstrip("\n")
-                logger.info(timestamp)
+                logger.info("init restore procedure for %s", timestamp)
 
                 db_path = f"{get_backup_base_dir()}/volume-meta-db.json"
 
@@ -310,18 +309,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     writer.write(meta_pickled)
                     await writer.drain()
 
-                    logger.info(
-                        "send initial config / secrets - waiting for archive requests"
-                    )
-
             case Command.REQUEST_ARCHIVE:
                 # next the client requests the archives which we extract here and pipe via a stream
                 # open the extract process and send the stream the output
                 request_archive = (await reader.readline()).decode().rstrip("\n")
-                logger.info(request_archive)
-
                 request_artifact = (await reader.readline()).decode().rstrip("\n")
-                logger.info(request_artifact)
+                logger.info("request archive: %s, request artifact: %s", request_archive, request_artifact)
 
                 backup_dir = f"{get_backup_base_dir()}/{request_archive}"
                 lock = await get_lock(backup_dir)
@@ -360,7 +353,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     # send the rest in the compressor
                     await send_cchunk(writer, reader, compressor.flush())
 
-                    logger.info("sending eof")
+                    logger.info("finished extracting, sending eof")
                     writer.write(struct.pack("!I", 0))
                     await writer.drain()
 
@@ -368,7 +361,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         logger.warning("Client disconnected: %s", e, exc_info=True)
     finally:
         writer.close()
-        # dont await on server side
+        # dont await to avoid race conditions
 
 
 async def run():
@@ -386,25 +379,7 @@ async def run():
 
 
 def main():
-    # # wait for drive to be available
-    # while True:
-    #     try:
-    #         get_backup_base_dir()
-    #         logger.info("Backup drive is available!")
-    #         break
-    #     except FileNotFoundError as e:
-    #         logger.debug(e)
-    #         logger.info("Backup drive not found, startup delayed.")
-    #         time.sleep(5)
-
     if ENV == "PRODUCTION":
         copy_backup_generic()
-
-    # backup_store_env_vars = ["PXC_BACKUP_BASE_DIR", "PXC_REMOVABLE_DATASTORES"]
-    # num_defined = len([var for var in backup_store_env_vars if os.getenv(var)])
-    # if num_defined != 1:
-    #     raise Exception(
-    #         f"Number of defined backup store vars is {num_defined} but should only be exactly 1 defined!"
-    #     )
 
     asyncio.run(run())

@@ -19,7 +19,7 @@ from kubernetes.client import (ApiException, V1ConfigMapVolumeSource,
 from kubernetes.config.kube_config import KubeConfigLoader
 from pve_cloud.cli.pvclu import (get_cloud_domain, get_ssh_master_kubeconfig,
                                  get_ssh_remote_master_kubeconfig)
-from pve_cloud.cli.pxrpc import get_simple_pxrpc, launch_pxrpc
+from pve_cloud.cli.pxrpc import get_simple_pxrpc
 from pve_cloud.lib.backup_rpc import Command
 from pve_cloud.lib.inventory import (get_cloud_domain, get_cluster_vars,
                                      get_online_pve_host,
@@ -84,7 +84,6 @@ async def list_backup_details_remote(args):
         else:
             # we will connect directly to the backup server
             # todo: here we can also pass the correct tls config
-
             tls_disc_raw = await pxrpc.get_cloud_secret(
                 cloud_domain, f"{bdd_stack_name}-bdd-tls-discovery"
             )
@@ -421,10 +420,6 @@ async def launch_restore_job(args):
             value=base64.b64encode(
                 json.dumps(
                     serializable_args
-                    # | {
-                    #     "cloud_domain": cloud_domain,
-                    #     "stack_name": kubespray_inv["stack_name"],
-                    # }
                 ).encode()
             ).decode(),
         ),
@@ -539,14 +534,12 @@ def get_parser():
         "--inventory",
         type=str,
         help="PVE cloud kubespray inventory yaml file or pxc external hosts k0s conform inventory file, in this cluster the restore job will be launched.",
-        # required=True,
     )
     base_parser.add_argument(
         "--use-mc-gw",
         action="store_true",
         help="Configures the backup job with the clouds external gateway instead of the internal bdd servers ip.",
     )
-    # todo: implement bdd-host-address
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 

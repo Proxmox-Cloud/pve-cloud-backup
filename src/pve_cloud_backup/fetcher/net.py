@@ -4,6 +4,7 @@ import os
 import pickle
 import ssl
 import struct
+import inspect
 
 import socketio
 import zstandard as zstd
@@ -28,7 +29,6 @@ async def archive_init(reader, writer, request_dict):
     # intialize archive command
     writer.write(struct.pack("B", Command.ARCHIVE.value))
     await writer.drain()
-    logger.debug("send command")
 
     # send the archive request dict
     req_dict_pickled = pickle.dumps(request_dict)
@@ -36,7 +36,6 @@ async def archive_init(reader, writer, request_dict):
     await writer.drain()
     writer.write(req_dict_pickled)
     await writer.drain()
-    logger.debug("send dict")
 
     # wait for go signal, server needs to aquire write lock
     # we dont
@@ -51,13 +50,12 @@ async def archive_init(reader, writer, request_dict):
             logger.error("recieved incorrect go signal")
             raise Exception("Incorrect go signal!")
         else:
+            logger.debug("received go")
             break
 
-    logger.debug("received go")
 
-
+# generic send and ack function
 async def send_cchunk(writer, reader, compressed_chunk):
-    # compress the chunk
     if compressed_chunk:  # only send if something actually got compressed
         # send size + chunk
         writer.write(struct.pack("!I", len(compressed_chunk)))
@@ -76,9 +74,7 @@ async def get_sio_mc_client(backup_addr):
             "Tried to initialize multicloud proxy without providing MC_EXT_TOKEN env var!"
         )
 
-    log_debug = os.getenv("LOG_LEVEL") == "DEBUG"
-    sio = socketio.AsyncClient()  # (logger=log_debug, engineio_logger=log_debug)
-
+    sio = socketio.AsyncClient()
     await sio.connect(
         backup_addr,
         auth={
@@ -87,31 +83,39 @@ async def get_sio_mc_client(backup_addr):
         },
         transports=["websocket"],
     )
+
     logger.debug(f"Connected sio client to {backup_addr}")
+
     return sio
 
 
+# sio framework takes care of acking messages
 async def sio_send_cchunk(sio, compressed_chunk):
     if compressed_chunk:
         await sio.call("backup_chunk", compressed_chunk)
 
 
 async def wait_archive_init(sio, request_dict):
+    # init archive request, this doesn't necessarily immediatly
+    # lock and ready the server for writing
     initial = await sio.call(
         "archive_init",
         request_dict,
         timeout=30,
     )
+    logger.debug("received init response: %s", initial)
+
     if initial["status"] == "ERR":
         raise RuntimeError(initial["error"])
 
     if initial["status"] == "ACQUIRED":
-        return
+        return # server acquired lock for backup repo
 
-    logger.info("waiting for lock")
-    # status WAIT
+    # ==> status WAIT
+    logger.info("waiting for lock...")
     while True:
         wait_call = await sio.call("wait_archive", timeout=30)
+        logger.debug("wait archive response: %s", wait_call)
 
         if wait_call["status"] == "ERR":
             raise RuntimeError(initial["error"])
@@ -119,24 +123,21 @@ async def wait_archive_init(sio, request_dict):
         if wait_call["status"] == "ACQUIRED":
             return
 
-        # continue wait
-        logger.info("continueing waiting")
-
 
 # compress parameter exists for chunk generators that already do the compression
 # the receiving side ALWAYS expects a compressed stream
-async def archive_async(backup_addr, request_dict, chunk_generator, compress=True):
-    logger.info(request_dict)
+async def archive(backup_addr, request_dict, chunk_generator, compress=True):
+    logger.info("sending archive request: %s", request_dict)
+    logger.debug("generator async: %s", inspect.isasyncgen(chunk_generator))
 
+    # we assume that we are sending to a multicloud gateway if the addr starts with https://
+    # direct connects via tcp are if the backup_addr is a hostname / ip address
     if backup_addr.startswith("https://"):
         logger.info(f"sending archive to mc gateway {backup_addr}")
 
-        # retry is currently only implemented for async generators
-        # which are the primary generator type for large image backups
         for attempt in range(1, SIO_MAX_RETRIES + 1):
             sio = None
             try:
-
                 # connection to mc gw
                 sio = await get_sio_mc_client(backup_addr)
 
@@ -148,18 +149,27 @@ async def archive_async(backup_addr, request_dict, chunk_generator, compress=Tru
                         threads=6,
                     ).compressobj()
 
-                    async for chunk in chunk_generator():
-                        await sio_send_cchunk(sio, compressor.compress(chunk))
+                    if inspect.isasyncgen(chunk_generator):
+                        async for chunk in chunk_generator():
+                            await sio_send_cchunk(sio, compressor.compress(chunk))
+                    else:
+                        for chunk in chunk_generator():
+                            await sio_send_cchunk(sio, compressor.compress(chunk))
 
                     await sio_send_cchunk(sio, compressor.flush())
 
                 else:
-                    async for chunk in chunk_generator():
-                        await sio.call("backup_chunk", chunk)
+                    if inspect.isasyncgen(chunk_generator):
+                        async for chunk in chunk_generator():
+                            await sio.call("backup_chunk", chunk)
+                    else:
+                        for chunk in chunk_generator():
+                            await sio.call("backup_chunk", chunk)
 
+                # signal the server that we are done
                 await sio.call("backup_eof")
 
-                break  # finished successfully
+                break  # finished successfully, break try loop
 
             except socketio.exceptions.TimeoutError:
                 logger.warn(f"Error on attempt {attempt}")
@@ -170,10 +180,12 @@ async def archive_async(backup_addr, request_dict, chunk_generator, compress=Tru
                 await asyncio.sleep(10)
 
             finally:
+                # always close the sio connection
                 if sio:
                     await sio.disconnect()
 
     else:
+        # direct connection to backup server
         reader, writer = await asyncio.open_connection(
             backup_addr, 8085, ssl=get_strict_client_ssl_ctx()
         )
@@ -184,65 +196,30 @@ async def archive_async(backup_addr, request_dict, chunk_generator, compress=Tru
         # compressor = zlib.compressobj(level=1)
         if compress:
             compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
-            async for chunk in chunk_generator():
-                await send_cchunk(writer, reader, compressor.compress(chunk))
+            if inspect.isasyncgen(chunk_generator):
+                async for chunk in chunk_generator():
+                    await send_cchunk(writer, reader, compressor.compress(chunk))
+            else:
+                for chunk in chunk_generator():
+                    await send_cchunk(writer, reader, compressor.compress(chunk))
+
             # send rest in compressor, compress doesnt always return a byte array, see bdd.py doc
             # send size first again
             await send_cchunk(writer, reader, compressor.flush())
 
         else:
-            async for chunk in chunk_generator():
-                writer.write(struct.pack("!I", len(chunk)))
-                await writer.drain()
-                writer.write(chunk)
-                await writer.drain()
-
-        # send eof to server, signal that we are done
-        logger.debug("sending eof")
-        writer.write(struct.pack("!I", 0))
-        await writer.drain()
-
-        # close the writer here, stdout needs to be closed by caller
-        writer.close()
-
-
-async def archive(backup_addr, request_dict, chunk_generator):
-    logger.info(request_dict)
-    if backup_addr.startswith("https://"):
-        sio = await get_sio_mc_client(backup_addr)
-
-        await wait_archive_init(sio, request_dict)
-
-        compressor = zstd.ZstdCompressor(
-            level=1,
-            threads=6,
-        ).compressobj()
-
-        for chunk in chunk_generator():
-            await sio_send_cchunk(sio, compressor.compress(chunk))
-
-        await sio_send_cchunk(sio, compressor.flush())
-
-        await sio.call("backup_eof")
-
-        await sio.disconnect()
-
-    else:
-        reader, writer = await asyncio.open_connection(
-            backup_addr, 8085, ssl=get_strict_client_ssl_ctx()
-        )
-
-        await archive_init(reader, writer, request_dict)
-
-        # initialize the synchronous generator and start reading chunks, compress and send
-        # compressor = zlib.compressobj(level=1)
-        compressor = zstd.ZstdCompressor(level=1, threads=6).compressobj()
-        for chunk in chunk_generator():
-            await send_cchunk(writer, reader, compressor.compress(chunk))
-
-        # send rest in compressor, compress doesnt always return a byte array, see bdd.py doc
-        # send size first again
-        await send_cchunk(writer, reader, compressor.flush())
+            if inspect.isasyncgen(chunk_generator):
+                async for chunk in chunk_generator():
+                    writer.write(struct.pack("!I", len(chunk)))
+                    await writer.drain()
+                    writer.write(chunk)
+                    await writer.drain()
+            else:
+                for chunk in chunk_generator():
+                    writer.write(struct.pack("!I", len(chunk)))
+                    await writer.drain()
+                    writer.write(chunk)
+                    await writer.drain()
 
         # send eof to server, signal that we are done
         logger.debug("sending eof")

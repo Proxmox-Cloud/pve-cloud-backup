@@ -260,7 +260,7 @@ async def send_export(send_command, semaphore):
 
             await proc.wait()
 
-        await net.archive_async(backup_addr, request_dict, async_chunk_generator)
+        await net.archive(backup_addr, request_dict, async_chunk_generator)
 
 
 async def send_backups(namespace_volume_meta, timestamp, backup_addr):
@@ -512,7 +512,7 @@ async def zfs_snap_and_send(
 
                     logger.info("dd exit code %s", proc.exit_status)
 
-                await net.archive_async(
+                await net.archive(
                     backup_addr, request_dict, chunk_generator, compress=False
                 )
 

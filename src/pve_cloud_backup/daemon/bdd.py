@@ -314,7 +314,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 # open the extract process and send the stream the output
                 request_archive = (await reader.readline()).decode().rstrip("\n")
                 request_artifact = (await reader.readline()).decode().rstrip("\n")
-                logger.info("request archive: %s, request artifact: %s", request_archive, request_artifact)
+                logger.info(
+                    "request archive: %s, request artifact: %s",
+                    request_archive,
+                    request_artifact,
+                )
 
                 backup_dir = f"{get_backup_base_dir()}/{request_archive}"
                 lock = await get_lock(backup_dir)

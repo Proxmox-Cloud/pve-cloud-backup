@@ -1,10 +1,10 @@
 import asyncio
+import inspect
 import logging
 import os
 import pickle
 import ssl
 import struct
-import inspect
 
 import socketio
 import zstandard as zstd
@@ -109,7 +109,7 @@ async def wait_archive_init(sio, request_dict):
         raise RuntimeError(initial["error"])
 
     if initial["status"] == "ACQUIRED":
-        return # server acquired lock for backup repo
+        return  # server acquired lock for backup repo
 
     # ==> status WAIT
     logger.info("waiting for lock...")

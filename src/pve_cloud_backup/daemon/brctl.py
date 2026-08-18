@@ -417,11 +417,7 @@ async def launch_restore_job(args):
     env_vars = [
         V1EnvVar(
             name="PXC_RESTORE_ARGS",
-            value=base64.b64encode(
-                json.dumps(
-                    serializable_args
-                ).encode()
-            ).decode(),
+            value=base64.b64encode(json.dumps(serializable_args).encode()).decode(),
         ),
         V1EnvVar(name="LOG_LEVEL", value=args.log_level),
     ]

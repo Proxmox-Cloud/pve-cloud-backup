@@ -154,6 +154,29 @@ def clean_pvc_dict(pvc_dict):
     pvc_dict.pop("api_version", None)
 
 
+async def wait_for_pvc_bound(core_v1, pvc_name, namespace, timeout=300, poll_interval=5):
+    logger.info(f"waiting for pvc '{pvc_name}' in '{namespace}' to become available...")
+    end_time = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < end_time:
+        try:
+            pvc = core_v1.read_namespaced_persistent_volume_claim(name=pvc_name, namespace=namespace)
+            phase = pvc.status.phase
+            logger.debug(f"pvc current phase: {phase}")
+
+            if phase == "Bound":
+                logger.info(f"pvc available!")
+                return
+
+            await asyncio.sleep(poll_interval)
+        except ApiException as e:
+            if e.status == 404:
+                await asyncio.sleep(poll_interval)
+            else:
+                raise
+
+    raise RuntimeError(f"timeout waiting for pvc to become available")
+
+
 def clean_pv_dict(pv_dict):
     # cleanup the old pv aswell for recreation
     pv_dict.pop("api_version", None)
@@ -690,6 +713,8 @@ async def procedure():
                         )
                     )
 
+                    await wait_for_pvc_bound(core_v1, pvc_dict["metadata"]["name"], restore_namespace)
+
                     # openebs zfs also has a custom resource for zvols that needs to be created
                     custom_api.create_namespaced_custom_object(
                         group="zfs.openebs.io",
@@ -973,6 +998,8 @@ async def procedure():
                         **convert_keys_to_camel_case(pv_dict)
                     )
                 )
+
+                await wait_for_pvc_bound(core_v1, pvc_dict["metadata"]["name"], restore_namespace)
 
         # scale back up again
         if restore_args["auto_scale"]:

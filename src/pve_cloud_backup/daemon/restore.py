@@ -141,11 +141,14 @@ def clean_pvc_dict(pvc_dict):
     pvc_dict["metadata"]["annotations"].pop(
         "volume.kubernetes.io/storage-provisioner", None
     )
+
+    pvc_dict["metadata"].pop("owner_references", None)
     pvc_dict["metadata"].pop("finalizers", None)
     pvc_dict["metadata"].pop("managed_fields", None)
     pvc_dict["metadata"].pop("resource_version", None)
     pvc_dict["metadata"].pop("uid", None)
     pvc_dict["metadata"].pop("creation_timestamp", None)
+
     pvc_dict.pop("status", None)
     pvc_dict.pop("kind", None)
     pvc_dict.pop("api_version", None)

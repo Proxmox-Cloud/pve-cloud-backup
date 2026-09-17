@@ -200,6 +200,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     secret_db = TinyDB(db_path)
                     secret_db.insert(meta_dict)
 
+                # send ack
+                writer.write(b"\x01")
+                await writer.drain()
+
             case Command.VOLUME_META:
                 dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
                 meta_dict = pickle.loads((await reader.readexactly(dict_size)))
@@ -209,6 +213,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 async with lock:
                     secret_db = TinyDB(db_path)
                     secret_db.insert(meta_dict)
+
+                # send ack
+                writer.write(b"\x01")
+                await writer.drain()
 
             # funcs called by brctl for restores
             case Command.LIST_BACKUPS:

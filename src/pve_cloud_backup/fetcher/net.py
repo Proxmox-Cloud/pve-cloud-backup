@@ -231,6 +231,8 @@ async def archive(backup_addr, request_dict, chunk_generator, compress=True):
 
 
 async def meta(backup_addr, cmd, meta_dict):
+    logger.info("sending meta request: %s", cmd)
+
     if backup_addr.startswith("https://"):
         sio = await get_sio_mc_client(backup_addr)
 
@@ -254,6 +256,10 @@ async def meta(backup_addr, cmd, meta_dict):
         # now send the dict
         writer.write(meta_pickled)
         await writer.drain()
+
+        ack = await reader.readexactly(1)
+        if ack != b"\x01":
+            raise RuntimeError("Expected x01 ack byte!")
 
         writer.close()
 

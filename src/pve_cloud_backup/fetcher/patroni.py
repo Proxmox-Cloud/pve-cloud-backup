@@ -9,7 +9,7 @@ logger = logging.getLogger("fetcher")
 
 
 async def backup_patroni(backup_addr, timestamp, proxmox, stack_fqdn, pkey):
-    logger.info("looking for " + stack_fqdn)
+    logger.info(f"looking for {stack_fqdn}")
 
     patroni_member = None
 
@@ -18,7 +18,7 @@ async def backup_patroni(backup_addr, timestamp, proxmox, stack_fqdn, pkey):
             break  # found our member
 
         node_name = node["node"]
-        logger.info("collecting node " + node_name)
+        logger.info(f"collecting node {node_name}")
 
         if node["status"] == "offline":
             logger.info(f"skipping offline node {node_name}")
@@ -43,7 +43,7 @@ async def backup_patroni(backup_addr, timestamp, proxmox, stack_fqdn, pkey):
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     logger.info(
-        "connecting to patroni member " + patroni_member["name"] + "." + stack_apex
+        f"connecting to patroni member {patroni_member['name']}.{stack_apex}"
     )
     ssh.connect(patroni_member["name"] + "." + stack_apex, username="root", pkey=pkey)
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
-from pve_cloud_backup.daemon.db import get_db, SQLiteQueryWithCondition
+from pve_cloud_backup.daemon.db import SQLiteQueryWithCondition, get_db
 
 logger = logging.getLogger("bdd")
 
@@ -54,10 +54,12 @@ def copy_backup_generic():
 
 def get_volume_metas(timestamp_filter=None):
     backup_base_dir = get_backup_base_dir()
-    
+
     # Check for HDD optimization flag
     use_hdd_opt = os.getenv("USE_HDD_OPTIMIZATION", "false").lower() == "true"
-    volume_meta_db = get_db(f"{backup_base_dir}/volume-meta-db.sqlite", use_hdd_optimization=use_hdd_opt)
+    volume_meta_db = get_db(
+        f"{backup_base_dir}/volume-meta-db.sqlite", use_hdd_optimization=use_hdd_opt
+    )
 
     archives = []
 
@@ -94,10 +96,12 @@ def get_volume_metas(timestamp_filter=None):
             timestamp_archives[timestamp] = []
 
         # Use SQLite query instead of TinyDB Query
-        condition = SQLiteQueryWithCondition([
-            {"type": "eq", "field": "image_name", "value": image},
-            {"type": "eq", "field": "timestamp", "value": timestamp}
-        ])
+        condition = SQLiteQueryWithCondition(
+            [
+                {"type": "eq", "field": "image_name", "value": image},
+                {"type": "eq", "field": "timestamp", "value": timestamp},
+            ]
+        )
         image_meta = volume_meta_db.get(condition)
 
         if image_meta is None:

@@ -8,7 +8,7 @@ import struct
 import zstandard as zstd
 from pve_cloud.lib.backup_rpc import Command
 
-from pve_cloud_backup.daemon.db import get_db, SQLiteQueryWithCondition
+from pve_cloud_backup.daemon.db import SQLiteQueryWithCondition, get_db
 from pve_cloud_backup.daemon.funcs import (copy_backup_generic,
                                            get_backup_base_dir,
                                            get_volume_metas, init_backup_dir)
@@ -210,8 +210,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 db_path = f"{get_backup_base_dir()}/volume-meta-db.sqlite"
 
                 # Check for HDD optimization flag
-                use_hdd_opt = os.getenv("USE_HDD_OPTIMIZATION", "false").lower() == "true"
-                
+                use_hdd_opt = (
+                    os.getenv("USE_HDD_OPTIMIZATION", "false").lower() == "true"
+                )
+
                 lock = await get_lock(db_path)
                 async with lock:
                     secret_db = get_db(db_path, use_hdd_optimization=use_hdd_opt)
@@ -261,18 +263,22 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 db_path = f"{get_backup_base_dir()}/ns-secret-db.sqlite"
 
                 # Check for HDD optimization flag
-                use_hdd_opt = os.getenv("USE_HDD_OPTIMIZATION", "false").lower() == "true"
-                
+                use_hdd_opt = (
+                    os.getenv("USE_HDD_OPTIMIZATION", "false").lower() == "true"
+                )
+
                 lock = await get_lock(db_path)
                 async with lock:
                     secret_db = get_db(db_path, use_hdd_optimization=use_hdd_opt)
 
                     stack = (await reader.readline()).decode().rstrip("\n")
 
-                    condition = SQLiteQueryWithCondition([
-                        {"type": "eq", "field": "timestamp", "value": timestamp},
-                        {"type": "eq", "field": "stack", "value": stack}
-                    ])
+                    condition = SQLiteQueryWithCondition(
+                        [
+                            {"type": "eq", "field": "timestamp", "value": timestamp},
+                            {"type": "eq", "field": "stack", "value": stack},
+                        ]
+                    )
                     ns_secrets = secret_db.get(condition)
 
                     meta_pickled = pickle.dumps(ns_secrets)
@@ -307,15 +313,17 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 db_path = f"{get_backup_base_dir()}/ns-secret-db.sqlite"
 
                 # Check for HDD optimization flag
-                use_hdd_opt = os.getenv("USE_HDD_OPTIMIZATION", "false").lower() == "true"
-                
+                use_hdd_opt = (
+                    os.getenv("USE_HDD_OPTIMIZATION", "false").lower() == "true"
+                )
+
                 lock = await get_lock(db_path)
                 async with lock:
                     secret_db = get_db(db_path, use_hdd_optimization=use_hdd_opt)
 
-                    condition = SQLiteQueryWithCondition([
-                        {"type": "eq", "field": "timestamp", "value": timestamp}
-                    ])
+                    condition = SQLiteQueryWithCondition(
+                        [{"type": "eq", "field": "timestamp", "value": timestamp}]
+                    )
                     ns_secrets = secret_db.get(condition)
 
                     meta_pickled = pickle.dumps(ns_secrets)

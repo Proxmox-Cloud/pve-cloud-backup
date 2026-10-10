@@ -3,12 +3,11 @@ SQLite database wrapper for replacing TinyDB.
 Provides similar API to TinyDB for easy migration.
 """
 
-import sqlite3
 import json
 import logging
-import os
+import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("bdd.db")
 
@@ -87,13 +86,15 @@ class SQLiteDB:
             cursor = conn.cursor()
 
             # Create a generic table for storing JSON documents
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS documents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     data TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            """)
+            """
+            )
 
             # Apply HDD optimizations if requested
             if self.use_hdd_optimization:
@@ -136,7 +137,9 @@ class SQLiteDB:
         finally:
             conn.close()
 
-    def get(self, condition: Optional[SQLiteQueryWithCondition] = None) -> Optional[Dict[str, Any]]:
+    def get(
+        self, condition: Optional[SQLiteQueryWithCondition] = None
+    ) -> Optional[Dict[str, Any]]:
         """
         Get a single document matching the condition.
 
@@ -257,7 +260,6 @@ class SQLiteDB:
     def close(self):
         """Close the database connection (cleanup)."""
         # SQLite connections are opened per operation, so no explicit close needed
-        pass
 
 
 def get_db(db_path: str, use_hdd_optimization: bool = False) -> SQLiteDB:

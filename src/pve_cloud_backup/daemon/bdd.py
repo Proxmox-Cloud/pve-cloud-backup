@@ -7,8 +7,8 @@ import struct
 
 import zstandard as zstd
 from pve_cloud.lib.backup_rpc import Command
-from tinydb import Query, TinyDB
 
+from pve_cloud_backup.daemon.db_sqlite import Query, get_db
 from pve_cloud_backup.daemon.funcs import (copy_backup_generic,
                                            get_backup_base_dir,
                                            get_volume_metas, init_backup_dir)
@@ -207,11 +207,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             case Command.VOLUME_META:
                 dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
                 meta_dict = pickle.loads((await reader.readexactly(dict_size)))
-                db_path = f"{get_backup_base_dir()}/volume-meta-db.json"
+                db_path = f"{get_backup_base_dir()}/volume-meta-db.sqlite"
 
                 lock = await get_lock(db_path)
                 async with lock:
-                    secret_db = TinyDB(db_path)
+                    secret_db = get_db(db_path)
                     secret_db.insert(meta_dict)
 
                 # send ack
@@ -238,7 +238,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             case Command.LIST_BACKUP_DETAILS:
                 timestamp = (await reader.readline()).decode().rstrip("\n")
 
-                db_path = f"{get_backup_base_dir()}/volume-meta-db.json"
+                db_path = f"{get_backup_base_dir()}/volume-meta-db.sqlite"
 
                 lock = await get_lock(db_path)
                 async with lock:
@@ -255,11 +255,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 await writer.drain()
 
                 # return k8s secret requests
-                db_path = f"{get_backup_base_dir()}/ns-secret-db.json"
+                db_path = f"{get_backup_base_dir()}/ns-secret-db.sqlite"
 
                 lock = await get_lock(db_path)
                 async with lock:
-                    secret_db = TinyDB(db_path)
+                    secret_db = get_db(db_path)
 
                     stack = (await reader.readline()).decode().rstrip("\n")
 
@@ -279,7 +279,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 timestamp = (await reader.readline()).decode().rstrip("\n")
                 logger.info("init restore procedure for %s", timestamp)
 
-                db_path = f"{get_backup_base_dir()}/volume-meta-db.json"
+                db_path = f"{get_backup_base_dir()}/volume-meta-db.sqlite"
 
                 lock = await get_lock(db_path)
                 async with lock:
@@ -297,11 +297,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                 # client then queries secrets of the backup to restore
                 # return k8s secret requests
-                db_path = f"{get_backup_base_dir()}/ns-secret-db.json"
+                db_path = f"{get_backup_base_dir()}/ns-secret-db.sqlite"
 
                 lock = await get_lock(db_path)
                 async with lock:
-                    secret_db = TinyDB(db_path)
+                    secret_db = get_db(db_path)
 
                     Meta = Query()
                     ns_secrets = secret_db.get(

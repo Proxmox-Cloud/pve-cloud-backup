@@ -8,7 +8,7 @@ from pathlib import Path
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
-from pve_cloud_backup.daemon.sqlite_db import Query, SQLiteDB
+from pve_cloud_backup.daemon.sqlite_db import Query, UnifiedSQLiteDB
 
 logger = logging.getLogger("bdd")
 
@@ -53,7 +53,7 @@ def copy_backup_generic():
 
 
 def get_volume_metas(timestamp_filter=None):
-    volume_meta_db = SQLiteDB(f"{get_backup_base_dir()}/volume-meta-db.sqlite")
+    volume_meta_db = UnifiedSQLiteDB(f"{get_backup_base_dir()}/backup-db.sqlite")
 
     archives = []
 
@@ -90,7 +90,7 @@ def get_volume_metas(timestamp_filter=None):
             timestamp_archives[timestamp] = []
 
         Meta = Query()
-        image_meta = volume_meta_db.get(
+        image_meta = volume_meta_db.get_volume_meta(
             (Meta.image_name == image) & (Meta.timestamp == timestamp)
         )
 

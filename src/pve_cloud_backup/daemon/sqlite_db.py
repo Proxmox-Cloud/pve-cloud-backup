@@ -1,21 +1,22 @@
 """
 SQLite database module to replace TinyDB.
 Provides similar query functionality with relational database backend.
+Uses a single database file with separate tables for different data types.
 """
 
+import json
 import logging
 import os
 import sqlite3
-from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class SQLiteDB:
+class UnifiedSQLiteDB:
     """
-    A simple SQLite wrapper that provides document-like storage similar to TinyDB.
-    Each "table" stores JSON documents with automatic schema management.
+    A unified SQLite database with separate tables for different data types.
+    Replaces multiple TinyDB files with a single SQLite database.
     """
 
     def __init__(self, db_path: str):
@@ -27,46 +28,61 @@ class SQLiteDB:
         """
         self.db_path = db_path
         # Ensure parent directory exists
-        os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else '.', exist_ok=True)
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
         self._init_db()
 
     def _init_db(self):
         """Initialize database tables if they don't exist."""
-        with self._get_connection() as conn:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        conn.row_factory = sqlite3.Row  # Enable row factory for dict-like access
+        try:
             cursor = conn.cursor()
-            # Create a generic documents table if it doesn't exist
-            # We'll use table names based on the db_path filename
-            table_name = self._get_table_name()
-            cursor.execute(f'''
-                CREATE TABLE IF NOT EXISTS {table_name} (
+            
+            # Create volume_metas table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS volume_metas (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     data TEXT NOT NULL,
+                    image_name TEXT,
+                    timestamp TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
+            # Create index for faster queries
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_volume_metas_image_timestamp 
+                ON volume_metas(image_name, timestamp)
+            ''')
+            
+            # Create ns_secrets table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS ns_secrets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    data TEXT NOT NULL,
+                    timestamp TEXT,
+                    stack TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create index for faster queries
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_ns_secrets_timestamp_stack 
+                ON ns_secrets(timestamp, stack)
+            ''')
+            
             conn.commit()
-            logger.debug(f"Initialized table '{table_name}' in {self.db_path}")
-
-    def _get_table_name(self) -> str:
-        """Get table name from database path."""
-        filename = os.path.basename(self.db_path)
-        # Convert filename to valid table name (remove extensions, replace special chars)
-        table_name = filename.replace('.json', '').replace('-', '_').replace('.', '_')
-        return f"documents_{table_name}"
-
-    @contextmanager
-    def _get_connection(self):
-        """Context manager for database connections."""
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
+            logger.debug(f"Initialized database at {self.db_path}")
         finally:
             conn.close()
 
-    def insert(self, document: Dict[str, Any]) -> int:
+    def insert_volume_meta(self, document: Dict[str, Any]) -> int:
         """
-        Insert a document into the database.
+        Insert a volume metadata document.
         
         Args:
             document: Dictionary to insert
@@ -74,24 +90,61 @@ class SQLiteDB:
         Returns:
             The ID of the inserted document
         """
-        import json
-        
-        with self._get_connection() as conn:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        try:
             cursor = conn.cursor()
-            table_name = self._get_table_name()
             data_json = json.dumps(document)
+            
+            # Extract indexed fields
+            image_name = document.get('image_name')
+            timestamp = document.get('timestamp')
+            
             cursor.execute(
-                f'INSERT INTO {table_name} (data) VALUES (?)',
-                (data_json,)
+                'INSERT INTO volume_metas (data, image_name, timestamp) VALUES (?, ?, ?)',
+                (data_json, image_name, timestamp)
             )
             conn.commit()
             doc_id = cursor.lastrowid
-            logger.debug(f"Inserted document with ID {doc_id}")
+            logger.debug(f"Inserted volume meta with ID {doc_id}")
             return doc_id
+        finally:
+            conn.close()
 
-    def get(self, condition_func) -> Optional[Dict[str, Any]]:
+    def insert_ns_secret(self, document: Dict[str, Any]) -> int:
         """
-        Get a single document matching the condition.
+        Insert a namespace secret document.
+        
+        Args:
+            document: Dictionary to insert
+            
+        Returns:
+            The ID of the inserted document
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.cursor()
+            data_json = json.dumps(document)
+            
+            # Extract indexed fields
+            timestamp = document.get('timestamp')
+            stack = document.get('stack')
+            
+            cursor.execute(
+                'INSERT INTO ns_secrets (data, timestamp, stack) VALUES (?, ?, ?)',
+                (data_json, timestamp, stack)
+            )
+            conn.commit()
+            doc_id = cursor.lastrowid
+            logger.debug(f"Inserted ns secret with ID {doc_id}")
+            return doc_id
+        finally:
+            conn.close()
+
+    def get_volume_meta(self, condition_func) -> Optional[Dict[str, Any]]:
+        """
+        Get a single volume meta document matching the condition.
         
         Args:
             condition_func: A callable that takes a document and returns True if it matches
@@ -99,25 +152,53 @@ class SQLiteDB:
         Returns:
             The matching document or None
         """
-        import json
-        
-        with self._get_connection() as conn:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        try:
             cursor = conn.cursor()
-            table_name = self._get_table_name()
-            cursor.execute(f'SELECT data FROM {table_name} ORDER BY id DESC')
+            cursor.execute('SELECT data FROM volume_metas ORDER BY id DESC')
             
             for row in cursor.fetchall():
                 doc = json.loads(row['data'])
                 if condition_func(doc):
-                    logger.debug(f"Found matching document: {doc}")
+                    logger.debug(f"Found matching volume meta: {doc}")
                     return doc
             
-            logger.debug("No matching document found")
+            logger.debug("No matching volume meta found")
             return None
+        finally:
+            conn.close()
 
-    def search(self, condition_func) -> List[Dict[str, Any]]:
+    def get_ns_secret(self, condition_func) -> Optional[Dict[str, Any]]:
         """
-        Search for all documents matching the condition.
+        Get a single ns secret document matching the condition.
+        
+        Args:
+            condition_func: A callable that takes a document and returns True if it matches
+            
+        Returns:
+            The matching document or None
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT data FROM ns_secrets ORDER BY id DESC')
+            
+            for row in cursor.fetchall():
+                doc = json.loads(row['data'])
+                if condition_func(doc):
+                    logger.debug(f"Found matching ns secret: {doc}")
+                    return doc
+            
+            logger.debug("No matching ns secret found")
+            return None
+        finally:
+            conn.close()
+
+    def search_volume_metas(self, condition_func) -> List[Dict[str, Any]]:
+        """
+        Search for all volume meta documents matching the condition.
         
         Args:
             condition_func: A callable that takes a document and returns True if it matches
@@ -125,12 +206,11 @@ class SQLiteDB:
         Returns:
             List of matching documents
         """
-        import json
-        
-        with self._get_connection() as conn:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        try:
             cursor = conn.cursor()
-            table_name = self._get_table_name()
-            cursor.execute(f'SELECT data FROM {table_name}')
+            cursor.execute('SELECT data FROM volume_metas')
             
             results = []
             for row in cursor.fetchall():
@@ -138,105 +218,81 @@ class SQLiteDB:
                 if condition_func(doc):
                     results.append(doc)
             
-            logger.debug(f"Found {len(results)} matching documents")
+            logger.debug(f"Found {len(results)} matching volume metas")
             return results
+        finally:
+            conn.close()
 
-    def all(self) -> List[Dict[str, Any]]:
+    def search_ns_secrets(self, condition_func) -> List[Dict[str, Any]]:
         """
-        Get all documents from the database.
+        Search for all ns secret documents matching the condition.
+        
+        Args:
+            condition_func: A callable that takes a document and returns True if it matches
+            
+        Returns:
+            List of matching documents
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT data FROM ns_secrets')
+            
+            results = []
+            for row in cursor.fetchall():
+                doc = json.loads(row['data'])
+                if condition_func(doc):
+                    results.append(doc)
+            
+            logger.debug(f"Found {len(results)} matching ns secrets")
+            return results
+        finally:
+            conn.close()
+
+    def all_volume_metas(self) -> List[Dict[str, Any]]:
+        """
+        Get all volume meta documents.
         
         Returns:
-            List of all documents
+            List of all volume meta documents
         """
-        import json
-        
-        with self._get_connection() as conn:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        try:
             cursor = conn.cursor()
-            table_name = self._get_table_name()
-            cursor.execute(f'SELECT data FROM {table_name}')
+            cursor.execute('SELECT data FROM volume_metas')
             
             results = []
             for row in cursor.fetchall():
                 results.append(json.loads(row['data']))
             
-            logger.debug(f"Retrieved {len(results)} documents")
+            logger.debug(f"Retrieved {len(results)} volume metas")
             return results
+        finally:
+            conn.close()
 
-    def remove(self, condition_func) -> int:
+    def all_ns_secrets(self) -> List[Dict[str, Any]]:
         """
-        Remove documents matching the condition.
+        Get all ns secret documents.
         
-        Args:
-            condition_func: A callable that takes a document and returns True if it should be removed
-            
         Returns:
-            Number of documents removed
+            List of all ns secret documents
         """
-        import json
-        
-        with self._get_connection() as conn:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        try:
             cursor = conn.cursor()
-            table_name = self._get_table_name()
+            cursor.execute('SELECT data FROM ns_secrets')
             
-            # Get all documents first to check condition
-            cursor.execute(f'SELECT id, data FROM {table_name}')
-            ids_to_remove = []
+            results = []
             for row in cursor.fetchall():
-                doc = json.loads(row['data'])
-                if condition_func(doc):
-                    ids_to_remove.append(row['id'])
+                results.append(json.loads(row['data']))
             
-            # Delete matching documents
-            if ids_to_remove:
-                placeholders = ','.join('?' * len(ids_to_remove))
-                cursor.execute(
-                    f'DELETE FROM {table_name} WHERE id IN ({placeholders})',
-                    ids_to_remove
-                )
-                conn.commit()
-                logger.debug(f"Removed {len(ids_to_remove)} documents")
-                return len(ids_to_remove)
-            
-            return 0
-
-    def count(self, condition_func=None) -> int:
-        """
-        Count documents in the database.
-        
-        Args:
-            condition_func: Optional callable to filter documents
-            
-        Returns:
-            Number of documents
-        """
-        import json
-        
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            table_name = self._get_table_name()
-            
-            if condition_func is None:
-                cursor.execute(f'SELECT COUNT(*) FROM {table_name}')
-                return cursor.fetchone()[0]
-            
-            # Count with filter
-            cursor.execute(f'SELECT data FROM {table_name}')
-            count = 0
-            for row in cursor.fetchall():
-                doc = json.loads(row['data'])
-                if condition_func(doc):
-                    count += 1
-            
-            return count
-
-    def clear(self):
-        """Remove all documents from the database."""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            table_name = self._get_table_name()
-            cursor.execute(f'DELETE FROM {table_name}')
-            conn.commit()
-            logger.debug("Cleared all documents")
+            logger.debug(f"Retrieved {len(results)} ns secrets")
+            return results
+        finally:
+            conn.close()
 
 
 # Query class to match TinyDB's Query API

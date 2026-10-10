@@ -11,7 +11,7 @@ from pve_cloud.lib.backup_rpc import Command
 from pve_cloud_backup.daemon.funcs import (copy_backup_generic,
                                            get_backup_base_dir,
                                            get_volume_metas, init_backup_dir)
-from pve_cloud_backup.daemon.sqlite_db import Query, SQLiteDB
+from pve_cloud_backup.daemon.sqlite_db import Query, UnifiedSQLiteDB
 from pve_cloud_backup.fetcher.net import send_cchunk
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -193,12 +193,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
                 meta_dict = pickle.loads((await reader.readexactly(dict_size)))
 
-                db_path = f"{get_backup_base_dir()}/ns-secret-db.sqlite"
+                db_path = f"{get_backup_base_dir()}/backup-db.sqlite"
 
-                lock = await get_lock(db_path)
-                async with lock:
-                    secret_db = SQLiteDB(db_path)
-                    secret_db.insert(meta_dict)
+                secret_db = UnifiedSQLiteDB(db_path)
+                secret_db.insert_ns_secret(meta_dict)
 
                 # send ack
                 writer.write(b"\x01")
@@ -207,12 +205,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             case Command.VOLUME_META:
                 dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
                 meta_dict = pickle.loads((await reader.readexactly(dict_size)))
-                db_path = f"{get_backup_base_dir()}/volume-meta-db.sqlite"
+                db_path = f"{get_backup_base_dir()}/backup-db.sqlite"
 
-                lock = await get_lock(db_path)
-                async with lock:
-                    secret_db = SQLiteDB(db_path)
-                    secret_db.insert(meta_dict)
+                secret_db = UnifiedSQLiteDB(db_path)
+                secret_db.insert_volume_meta(meta_dict)
 
                 # send ack
                 writer.write(b"\x01")
@@ -220,12 +216,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
             # funcs called by brctl for restores
             case Command.LIST_BACKUPS:
-                db_path = f"{get_backup_base_dir()}/volume-meta-db.sqlite"
+                db_path = f"{get_backup_base_dir()}/backup-db.sqlite"
 
-                lock = await get_lock(db_path)
-                async with lock:
-                    # we call borg on all our backups and send a return string that is strictly for display via the cli tool
-                    timestamp_archives = get_volume_metas()
+                # we call borg on all our backups and send a return string that is strictly for display via the cli tool
+                timestamp_archives = get_volume_metas()
 
                 # simply return all archives
                 archives_pickled = pickle.dumps(timestamp_archives)
@@ -238,13 +232,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             case Command.LIST_BACKUP_DETAILS:
                 timestamp = (await reader.readline()).decode().rstrip("\n")
 
-                db_path = f"{get_backup_base_dir()}/volume-meta-db.sqlite"
+                db_path = f"{get_backup_base_dir()}/backup-db.sqlite"
 
-                lock = await get_lock(db_path)
-                async with lock:
-                    # we call borg on all our backups and send a return string that is strictly for display via the cli tool
-                    # this time we need the filter for displaying details of a certain backup
-                    timestamp_archives = get_volume_metas(timestamp_filter=timestamp)
+                # we call borg on all our backups and send a return string that is strictly for display via the cli tool
+                # this time we need the filter for displaying details of a certain backup
+                timestamp_archives = get_volume_metas(timestamp_filter=timestamp)
 
                 # return the archive
                 archive_pickled = pickle.dumps(timestamp_archives[timestamp])
@@ -255,37 +247,33 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 await writer.drain()
 
                 # return k8s secret requests
-                db_path = f"{get_backup_base_dir()}/ns-secret-db.sqlite"
+                db_path = f"{get_backup_base_dir()}/backup-db.sqlite"
 
-                lock = await get_lock(db_path)
-                async with lock:
-                    secret_db = SQLiteDB(db_path)
+                secret_db = UnifiedSQLiteDB(db_path)
 
-                    stack = (await reader.readline()).decode().rstrip("\n")
+                stack = (await reader.readline()).decode().rstrip("\n")
 
-                    Meta = Query()
-                    ns_secrets = secret_db.get(
-                        (Meta.timestamp == timestamp) & (Meta.stack == stack)
-                    )
+                Meta = Query()
+                ns_secrets = secret_db.get_ns_secret(
+                    (Meta.timestamp == timestamp) & (Meta.stack == stack)
+                )
 
-                    meta_pickled = pickle.dumps(ns_secrets)
-                    writer.write(struct.pack("!I", len(meta_pickled)))
-                    await writer.drain()
+                meta_pickled = pickle.dumps(ns_secrets)
+                writer.write(struct.pack("!I", len(meta_pickled)))
+                await writer.drain()
 
-                    writer.write(meta_pickled)
-                    await writer.drain()
+                writer.write(meta_pickled)
+                await writer.drain()
 
             case Command.INIT_RESTORE_PROCEDURE:
                 timestamp = (await reader.readline()).decode().rstrip("\n")
                 logger.info("init restore procedure for %s", timestamp)
 
-                db_path = f"{get_backup_base_dir()}/volume-meta-db.sqlite"
+                db_path = f"{get_backup_base_dir()}/backup-db.sqlite"
 
-                lock = await get_lock(db_path)
-                async with lock:
-                    # we call borg on all our backups and send a return string that is strictly for display via the cli tool
-                    # this time we need the filter for displaying details of a certain backup
-                    timestamp_archives = get_volume_metas(timestamp_filter=timestamp)
+                # we call borg on all our backups and send a return string that is strictly for display via the cli tool
+                # this time we need the filter for displaying details of a certain backup
+                timestamp_archives = get_volume_metas(timestamp_filter=timestamp)
 
                 # return the archive
                 archive_pickled = pickle.dumps(timestamp_archives[timestamp])
@@ -297,25 +285,23 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                 # client then queries secrets of the backup to restore
                 # return k8s secret requests
-                db_path = f"{get_backup_base_dir()}/ns-secret-db.sqlite"
+                db_path = f"{get_backup_base_dir()}/backup-db.sqlite"
 
-                lock = await get_lock(db_path)
-                async with lock:
-                    secret_db = SQLiteDB(db_path)
+                secret_db = UnifiedSQLiteDB(db_path)
 
-                    Meta = Query()
-                    ns_secrets = secret_db.get(
-                        (
-                            Meta.timestamp == timestamp
-                        )  # timestamp is our unique id for the backup
-                    )
+                Meta = Query()
+                ns_secrets = secret_db.get_ns_secret(
+                    (
+                        Meta.timestamp == timestamp
+                    )  # timestamp is our unique id for the backup
+                )
 
-                    meta_pickled = pickle.dumps(ns_secrets)
-                    writer.write(struct.pack("!I", len(meta_pickled)))
-                    await writer.drain()
+                meta_pickled = pickle.dumps(ns_secrets)
+                writer.write(struct.pack("!I", len(meta_pickled)))
+                await writer.drain()
 
-                    writer.write(meta_pickled)
-                    await writer.drain()
+                writer.write(meta_pickled)
+                await writer.drain()
 
             case Command.REQUEST_ARCHIVE:
                 # next the client requests the archives which we extract here and pipe via a stream

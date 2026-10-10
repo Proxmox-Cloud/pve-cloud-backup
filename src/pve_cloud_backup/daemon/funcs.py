@@ -7,7 +7,8 @@ from pathlib import Path
 
 from kubernetes import client
 from kubernetes.client.rest import ApiException
-from tinydb import Query, TinyDB
+
+from pve_cloud_backup.daemon.sqlite_db import Query, SQLiteDB
 
 logger = logging.getLogger("bdd")
 
@@ -52,7 +53,7 @@ def copy_backup_generic():
 
 
 def get_volume_metas(timestamp_filter=None):
-    volume_meta_db = TinyDB(f"{get_backup_base_dir()}/volume-meta-db.json")
+    volume_meta_db = SQLiteDB(f"{get_backup_base_dir()}/volume-meta-db.sqlite")
 
     archives = []
 

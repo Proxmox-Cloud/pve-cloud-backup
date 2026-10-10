@@ -7,7 +7,8 @@ from pathlib import Path
 
 from kubernetes import client
 from kubernetes.client.rest import ApiException
-from tinydb import Query, TinyDB
+
+from pve_cloud_backup.daemon.db import get_db, SQLiteQueryWithCondition
 
 logger = logging.getLogger("bdd")
 
@@ -52,12 +53,16 @@ def copy_backup_generic():
 
 
 def get_volume_metas(timestamp_filter=None):
-    volume_meta_db = TinyDB(f"{get_backup_base_dir()}/volume-meta-db.json")
+    backup_base_dir = get_backup_base_dir()
+    
+    # Check for HDD optimization flag
+    use_hdd_opt = os.getenv("USE_HDD_OPTIMIZATION", "false").lower() == "true"
+    volume_meta_db = get_db(f"{backup_base_dir}/volume-meta-db.sqlite", use_hdd_optimization=use_hdd_opt)
 
     archives = []
 
     # iterate all k8s namespaced borg repos
-    k8s_base_path = f"{get_backup_base_dir()}/borg-k8s"
+    k8s_base_path = f"{backup_base_dir}/borg-k8s"
     namespace_repos = [
         name
         for name in os.listdir(k8s_base_path)
@@ -66,7 +71,7 @@ def get_volume_metas(timestamp_filter=None):
 
     for repo in namespace_repos:
         list_result = subprocess.run(
-            ["borg", "list", f"{get_backup_base_dir()}/borg-k8s/{repo}", "--json"],
+            ["borg", "list", f"{backup_base_dir}/borg-k8s/{repo}", "--json"],
             capture_output=True,
         )
 
@@ -88,10 +93,12 @@ def get_volume_metas(timestamp_filter=None):
         if timestamp not in timestamp_archives:
             timestamp_archives[timestamp] = []
 
-        Meta = Query()
-        image_meta = volume_meta_db.get(
-            (Meta.image_name == image) & (Meta.timestamp == timestamp)
-        )
+        # Use SQLite query instead of TinyDB Query
+        condition = SQLiteQueryWithCondition([
+            {"type": "eq", "field": "image_name", "value": image},
+            {"type": "eq", "field": "timestamp", "value": timestamp}
+        ])
+        image_meta = volume_meta_db.get(condition)
 
         if image_meta is None:
             logger.error(

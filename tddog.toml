@@ -9,6 +9,9 @@ build_commands = [
     "docker", "push", "$REGISTRY_IP:5000/pve-cloud-backup:$VERSION"
   ],
   [
+    "tddog", "clean-docker", "$REGISTRY_IP:5000/pve-cloud-backup"
+  ],
+  [
     "rm", "-rf", "dist/"
   ],
   [
@@ -18,6 +21,9 @@ build_commands = [
     "twine", "upload", "--repository-url", "http://$REGISTRY_IP:8088/",
     "--username", "doesnt", "--password", "matter",
     "dist/py_pve_cloud_backup-$VERSION.tar.gz", "dist/py_pve_cloud_backup-$VERSION-py3-none-any.whl"
+  ],
+  [
+    "tddog", "clean-pypi", "py-pve-cloud-backup", "$REGISTRY_IP:8088"
   ]
 ]
 dyn_version_py_path = "src/pve_cloud_backup/_version.py"

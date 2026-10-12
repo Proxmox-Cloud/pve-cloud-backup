@@ -191,6 +191,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             case Command.NAMESPACE_SECRETS:
                 # read meta dict size
                 dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
+                logger.debug(f"reading secret dict of size {dict_size}")
                 meta_dict = pickle.loads((await reader.readexactly(dict_size)))
 
                 db_path = f"{get_backup_base_dir()}/ns-secret-db.json"

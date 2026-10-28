@@ -52,7 +52,7 @@ def borg_list_timestamps(archive_dir: str):
     for archive in archives:
         archive_name = archive["archive"]
         timestamp = archive_name.split("_", 1)[1]
-        timestamps.add(timestamp)
+        timestamps.append(timestamp)
 
     return timestamps
 
@@ -77,6 +77,7 @@ def collect_borg_timestamps(base_dir: str) -> set:
 
 def prune_database(borg_timestamps: set):
     db_timestamps = get_db_timestamps()
+    # delete all timestamp ids from the sqlite database that were not found in borg
     timestamps_to_delete = db_timestamps - borg_timestamps
 
     logger.info(f"pruning {len(timestamps_to_delete)} timestamps from database!")

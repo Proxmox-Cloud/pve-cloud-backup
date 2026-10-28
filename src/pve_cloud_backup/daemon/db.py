@@ -84,7 +84,6 @@ async def get_volume_metas(timestamp_filter: Optional[str] = None) -> dict:
     backup timestamp id.
     """
     async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
         if timestamp_filter:
             cursor = await db.execute(
                 "SELECT timestamp, data_json FROM volume_meta WHERE timestamp = ?",
@@ -123,7 +122,7 @@ async def get_stack_secrets(timestamp: str) -> Optional[dict]:
         )
         row = await cursor.fetchone()
         if row:
-            return json.dumps(row[0])
+            return json.loads(row[0])
         return None
 
 

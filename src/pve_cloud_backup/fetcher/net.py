@@ -268,5 +268,5 @@ async def volume_meta(backup_addr, meta_dict):
     await meta(backup_addr, Command.VOLUME_META, meta_dict)
 
 
-async def namespace_secrets(backup_addr, meta_dict):
-    await meta(backup_addr, Command.NAMESPACE_SECRETS, meta_dict)
+async def stack_secrets(backup_addr, meta_dict):
+    await meta(backup_addr, Command.STACK_SECRETS, meta_dict)

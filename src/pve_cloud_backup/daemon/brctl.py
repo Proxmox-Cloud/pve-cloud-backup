@@ -52,8 +52,8 @@ async def list_backup_details_remote(args):
     # launch our rpc service to read discovery secrets and prepare
     # acessing the backup server
     logger.info(f"connecting to {pve_host} via {jump_host}")
-    metas = None
-    stack_meta = None
+    volume_metas = None
+    stack_secrets = None
 
     async with get_simple_pxrpc(pve_host, jump_host) as pxrpc:
         if args.use_mc_gw:
@@ -79,8 +79,8 @@ async def list_backup_details_remote(args):
 
             sio.disconnect()
 
-            metas = result["metas"]
-            stack_meta = result["stack_meta"]
+            volume_metas = result["volume_metas"]
+            stack_secrets = result["stack_secrets"]
         else:
             # we will connect directly to the backup server
             # todo: here we can also pass the correct tls config
@@ -112,29 +112,21 @@ async def list_backup_details_remote(args):
 
             # read the archives
             dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-            metas = pickle.loads((await reader.readexactly(dict_size)))
-
-            # first we group metas
-            k8s_stack = metas[0]["stack"]
-
-            print(f"k8s stack {k8s_stack}:")
-
-            # query the server for backup secrets
-            writer.write((k8s_stack + "\n").encode())
-            await writer.drain()
+            volume_metas = pickle.loads((await reader.readexactly(dict_size)))
 
             # read the the meta information
             dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-            stack_meta = pickle.loads((await reader.readexactly(dict_size)))
+            stack_secrets = pickle.loads((await reader.readexactly(dict_size)))
 
+        # load secrets
         namespace_secret_dict = pickle.loads(
-            base64.b64decode(stack_meta["namespace_secret_dict_b64"])
+            base64.b64decode(stack_secrets["namespace_secret_dict_b64"])
         )
 
         namespace_k8s_metas = {}
 
         # group metas by namespace
-        for meta in metas:
+        for meta in volume_metas:
             if meta["namespace"] not in namespace_k8s_metas:
                 namespace_k8s_metas[meta["namespace"]] = []
 
@@ -205,7 +197,7 @@ async def list_backups_remote(args):
     # launch our rpc service to read discovery secrets and prepare
     # acessing the backup server
     logger.info(f"connecting to {pve_host} via {jump_host}")
-    archives = None
+    volume_metas = None
 
     async with get_simple_pxrpc(pve_host, jump_host) as pxrpc:
         if args.use_mc_gw:
@@ -230,7 +222,7 @@ async def list_backups_remote(args):
 
             sio.disconnect()
 
-            archives = result["archives"]
+            volume_metas = result["volume_metas"]
 
         else:
             tls_disc_raw = await pxrpc.get_cloud_secret(
@@ -255,15 +247,15 @@ async def list_backups_remote(args):
 
             # read the response archives size and then the archives
             dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
-            archives = pickle.loads((await reader.readexactly(dict_size)))
+            volume_metas = pickle.loads((await reader.readexactly(dict_size)))
 
         if args.json:
-            print(json.dumps(sorted(archives)))
+            print(json.dumps(sorted(volume_metas)))
             return
 
         print("available backup timestamps (ids):")
 
-        for timestamp in sorted(archives):
+        for timestamp in sorted(volume_metas):
             print(f"- timestamp {timestamp}")
 
 

@@ -54,7 +54,7 @@ async def run():
             backup_config["k8s_stack"],
             backup_addr,
         )
-        await funcs.post_k8s_namespace_secrets(
+        await funcs.post_k8s_stack_secrets(
             namespace_secrets_zfs,
             timestamp,
             backup_config["k8s_stack"],

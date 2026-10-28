@@ -333,7 +333,7 @@ async def post_volume_meta(namespace_volume_meta, timestamp, k8s_stack, backup_a
             await net.volume_meta(backup_addr, body)
 
 
-async def post_k8s_namespace_secrets(
+async def post_k8s_stack_secrets(
     namespace_secrets, timestamp, k8s_stack, backup_addr
 ):
 
@@ -347,7 +347,7 @@ async def post_k8s_namespace_secrets(
     }
     logger.debug(f"posting {body}")
 
-    await net.namespace_secrets(backup_addr, body)
+    await net.stack_secrets(backup_addr, body)
 
 
 def cleanup(namespace_volume_meta, timestamp, unique_pools):

@@ -7,11 +7,13 @@ import struct
 
 import zstandard as zstd
 from pve_cloud.lib.backup_rpc import Command
-from tinydb import Query, TinyDB
 
+from pve_cloud_backup.daemon.db import (get_stack_secrets, get_volume_metas,
+                                        init_db, insert_stack_secret,
+                                        insert_volume_meta)
 from pve_cloud_backup.daemon.funcs import (copy_backup_generic,
-                                           get_backup_base_dir,
-                                           get_volume_metas, init_backup_dir)
+                                           init_backup_dir,
+                                           get_backup_base_dir)
 from pve_cloud_backup.fetcher.net import send_cchunk
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -188,135 +190,87 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 finally:
                     lock.release()
 
-            case Command.NAMESPACE_SECRETS:
-                # read meta dict size
+            case Command.STACK_SECRETS:
                 dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
                 logger.debug(f"reading secret dict of size {dict_size}")
                 meta_dict = pickle.loads((await reader.readexactly(dict_size)))
 
-                db_path = f"{get_backup_base_dir()}/ns-secret-db.json"
+                await insert_stack_secret(meta_dict)
 
-                lock = await get_lock(db_path)
-                async with lock:
-                    secret_db = TinyDB(db_path)
-                    secret_db.insert(meta_dict)
-
-                # send ack
                 writer.write(b"\x01")
                 await writer.drain()
 
             case Command.VOLUME_META:
                 dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
                 meta_dict = pickle.loads((await reader.readexactly(dict_size)))
-                db_path = f"{get_backup_base_dir()}/volume-meta-db.json"
 
-                lock = await get_lock(db_path)
-                async with lock:
-                    secret_db = TinyDB(db_path)
-                    secret_db.insert(meta_dict)
+                await insert_volume_meta(
+                    meta_dict
+                )
 
-                # send ack
                 writer.write(b"\x01")
                 await writer.drain()
 
             # funcs called by brctl for restores
             case Command.LIST_BACKUPS:
-                db_path = f"{get_backup_base_dir()}/volume-meta-db.json"
-
-                lock = await get_lock(db_path)
-                async with lock:
-                    # we call borg on all our backups and send a return string that is strictly for display via the cli tool
-                    timestamp_archives = get_volume_metas()
+                volume_metas = await get_volume_metas()
 
                 # simply return all archives
-                archives_pickled = pickle.dumps(timestamp_archives)
-                writer.write(struct.pack("!I", len(archives_pickled)))
+                metas_pickled = pickle.dumps(volume_metas)
+                writer.write(struct.pack("!I", len(metas_pickled)))
                 await writer.drain()
 
-                writer.write(archives_pickled)
+                writer.write(metas_pickled)
                 await writer.drain()
 
             case Command.LIST_BACKUP_DETAILS:
                 timestamp = (await reader.readline()).decode().rstrip("\n")
 
-                db_path = f"{get_backup_base_dir()}/volume-meta-db.json"
+                volume_metas = await get_volume_metas(timestamp_filter=timestamp)
 
-                lock = await get_lock(db_path)
-                async with lock:
-                    # we call borg on all our backups and send a return string that is strictly for display via the cli tool
-                    # this time we need the filter for displaying details of a certain backup
-                    timestamp_archives = get_volume_metas(timestamp_filter=timestamp)
-
-                # return the archive
-                archive_pickled = pickle.dumps(timestamp_archives[timestamp])
-                writer.write(struct.pack("!I", len(archive_pickled)))
+                # return the volume metas
+                metas_pickled = pickle.dumps(volume_metas[timestamp])
+                writer.write(struct.pack("!I", len(metas_pickled)))
                 await writer.drain()
 
-                writer.write(archive_pickled)
+                writer.write(metas_pickled)
                 await writer.drain()
 
-                # return k8s secret requests
-                db_path = f"{get_backup_base_dir()}/ns-secret-db.json"
+                # return the secrets
+                stack_secrets = await get_stack_secrets(timestamp)
 
-                lock = await get_lock(db_path)
-                async with lock:
-                    secret_db = TinyDB(db_path)
+                meta_pickled = pickle.dumps(stack_secrets)
+                writer.write(struct.pack("!I", len(meta_pickled)))
+                await writer.drain()
 
-                    stack = (await reader.readline()).decode().rstrip("\n")
-
-                    Meta = Query()
-                    ns_secrets = secret_db.get(
-                        (Meta.timestamp == timestamp) & (Meta.stack == stack)
-                    )
-
-                    meta_pickled = pickle.dumps(ns_secrets)
-                    writer.write(struct.pack("!I", len(meta_pickled)))
-                    await writer.drain()
-
-                    writer.write(meta_pickled)
-                    await writer.drain()
+                writer.write(meta_pickled)
+                await writer.drain()
 
             case Command.INIT_RESTORE_PROCEDURE:
                 timestamp = (await reader.readline()).decode().rstrip("\n")
                 logger.info("init restore procedure for %s", timestamp)
 
-                db_path = f"{get_backup_base_dir()}/volume-meta-db.json"
-
-                lock = await get_lock(db_path)
-                async with lock:
-                    # we call borg on all our backups and send a return string that is strictly for display via the cli tool
-                    # this time we need the filter for displaying details of a certain backup
-                    timestamp_archives = get_volume_metas(timestamp_filter=timestamp)
+                volume_metas = await get_volume_metas(timestamp_filter=timestamp)
 
                 # return the archive
-                archive_pickled = pickle.dumps(timestamp_archives[timestamp])
-                writer.write(struct.pack("!I", len(archive_pickled)))
+                metas_pickled = pickle.dumps(volume_metas[timestamp])
+                writer.write(struct.pack("!I", len(metas_pickled)))
                 await writer.drain()
 
-                writer.write(archive_pickled)
+                writer.write(metas_pickled)
                 await writer.drain()
 
-                # client then queries secrets of the backup to restore
-                # return k8s secret requests
-                db_path = f"{get_backup_base_dir()}/ns-secret-db.json"
+                stack_secrets = await get_stack_secrets(timestamp)
 
-                lock = await get_lock(db_path)
-                async with lock:
-                    secret_db = TinyDB(db_path)
+                if not stack_secrets:
+                    raise RuntimeError(f"No stack secrets found for timestamp {timestamp}")
 
-                    Meta = Query()
-                    ns_secrets = secret_db.get(
-                        (
-                            Meta.timestamp == timestamp
-                        )  # timestamp is our unique id for the backup
-                    )
+                meta_pickled = pickle.dumps(stack_secrets)
+                writer.write(struct.pack("!I", len(meta_pickled)))
+                await writer.drain()
 
-                    meta_pickled = pickle.dumps(ns_secrets)
-                    writer.write(struct.pack("!I", len(meta_pickled)))
-                    await writer.drain()
-
-                    writer.write(meta_pickled)
-                    await writer.drain()
+                writer.write(meta_pickled)
+                await writer.drain()
 
             case Command.REQUEST_ARCHIVE:
                 # next the client requests the archives which we extract here and pipe via a stream
@@ -378,6 +332,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def run():
+    await init_db()
     certs_dir = "/opt/bdd/certs"
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(

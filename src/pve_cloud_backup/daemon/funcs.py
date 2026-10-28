@@ -7,7 +7,8 @@ from pathlib import Path
 
 from kubernetes import client
 from kubernetes.client.rest import ApiException
-from tinydb import Query, TinyDB
+
+from pve_cloud_backup.daemon.db import get_volume_metas as db_get_volume_metas
 
 logger = logging.getLogger("bdd")
 
@@ -51,12 +52,9 @@ def copy_backup_generic():
                 shutil.copy2(full_source_path, full_dest_path)
 
 
-def get_volume_metas(timestamp_filter=None):
-    volume_meta_db = TinyDB(f"{get_backup_base_dir()}/volume-meta-db.json")
+async def get_volume_metas(timestamp_filter=None):
+    db_result = await db_get_volume_metas(timestamp_filter)
 
-    archives = []
-
-    # iterate all k8s namespaced borg repos
     k8s_base_path = f"{get_backup_base_dir()}/borg-k8s"
     namespace_repos = [
         name
@@ -64,6 +62,7 @@ def get_volume_metas(timestamp_filter=None):
         if os.path.isdir(os.path.join(k8s_base_path, name))
     ]
 
+    archives = []
     for repo in namespace_repos:
         list_result = subprocess.run(
             ["borg", "list", f"{get_backup_base_dir()}/borg-k8s/{repo}", "--json"],
@@ -77,29 +76,18 @@ def get_volume_metas(timestamp_filter=None):
 
         archives.extend(json.loads(list_result.stdout)["archives"])
 
-    timestamp_archives = {}
+    result = {}
     for archive in archives:
         image = archive["archive"].split("_", 1)[0]
         timestamp = archive["archive"].split("_", 1)[1]
 
         if timestamp_filter is not None and timestamp_filter != timestamp:
-            continue  # skip filtered
-
-        if timestamp not in timestamp_archives:
-            timestamp_archives[timestamp] = []
-
-        Meta = Query()
-        image_meta = volume_meta_db.get(
-            (Meta.image_name == image) & (Meta.timestamp == timestamp)
-        )
-
-        if image_meta is None:
-            logger.error(
-                f"None meta found {timestamp}, image_name {image}, archive {archive}"
-            )
-            del timestamp_archives[timestamp]
             continue
 
-        timestamp_archives[timestamp].append(image_meta)
+        if timestamp not in result:
+            result[timestamp] = []
 
-    return timestamp_archives
+        if timestamp in db_result:
+            result[timestamp].extend(db_result[timestamp])
+
+    return result

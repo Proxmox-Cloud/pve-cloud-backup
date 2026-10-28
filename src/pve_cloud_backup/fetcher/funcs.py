@@ -333,9 +333,7 @@ async def post_volume_meta(namespace_volume_meta, timestamp, k8s_stack, backup_a
             await net.volume_meta(backup_addr, body)
 
 
-async def post_k8s_stack_secrets(
-    namespace_secrets, timestamp, k8s_stack, backup_addr
-):
+async def post_k8s_stack_secrets(namespace_secrets, timestamp, k8s_stack, backup_addr):
 
     namespace_secret_dict_b64 = base64.b64encode(
         pickle.dumps(namespace_secrets)

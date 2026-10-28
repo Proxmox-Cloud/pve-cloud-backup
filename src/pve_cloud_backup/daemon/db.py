@@ -1,7 +1,8 @@
-import aiosqlite
 import json
 import sqlite3
 from typing import Optional, Set
+
+import aiosqlite
 
 DB_PATH = "/mnt/bdd-zfs-data/backup-metadata.db"
 
@@ -12,27 +13,39 @@ async def init_db():
     # result in a big db
     async with aiosqlite.connect(DB_PATH) as db:
         # create table for storing kubernetes volume related information
-        await db.execute("""
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS volume_meta (
                 image_name TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 data_json TEXT NOT NULL,
                 PRIMARY KEY (image_name, timestamp)
             )
-        """)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_volume_meta_timestamp ON volume_meta(timestamp)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_volume_meta_image ON volume_meta(image_name)")
+        """
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_volume_meta_timestamp ON volume_meta(timestamp)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_volume_meta_image ON volume_meta(image_name)"
+        )
 
         # table for storing secrets of multiple k8s namespaces per row (grouped by proxmox cloud stack)
-        await db.execute("""
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS stack_secrets (
                 timestamp TEXT PRIMARY KEY,
                 stack TEXT NOT NULL,
                 data_json TEXT NOT NULL
             )
-        """)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_stack_secrets_timestamp ON stack_secrets(timestamp)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_stack_secrets_stack ON stack_secrets(stack)")
+        """
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stack_secrets_timestamp ON stack_secrets(timestamp)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stack_secrets_stack ON stack_secrets(stack)"
+        )
         await db.commit()
 
 
@@ -43,7 +56,7 @@ async def insert_volume_meta(meta_dict: dict) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "INSERT OR REPLACE INTO volume_meta (image_name, timestamp, data_json) VALUES (?, ?, ?)",
-            (image_name, timestamp, json.dumps(meta_dict))
+            (image_name, timestamp, json.dumps(meta_dict)),
         )
         await db.commit()
         return cursor.lastrowid
@@ -56,7 +69,7 @@ async def get_volume_meta(image_name: str, timestamp: str) -> Optional[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT data_json FROM volume_meta WHERE image_name = ? AND timestamp = ?",
-            (image_name, timestamp)
+            (image_name, timestamp),
         )
         row = await cursor.fetchone()
         if row:
@@ -75,11 +88,11 @@ async def get_volume_metas(timestamp_filter: Optional[str] = None) -> dict:
         if timestamp_filter:
             cursor = await db.execute(
                 "SELECT timestamp, data_json FROM volume_meta WHERE timestamp = ?",
-                (timestamp_filter,)
+                (timestamp_filter,),
             )
         else:
             cursor = await db.execute("SELECT timestamp, data_json FROM volume_meta")
-        
+
         rows = await cursor.fetchall()
         result = {}
         for row in rows:
@@ -97,7 +110,7 @@ async def insert_stack_secret(data: dict) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "INSERT INTO stack_secrets (timestamp, stack, data_json) VALUES (?, ?, ?)",
-            (timestamp, stack, json.dumps(data))
+            (timestamp, stack, json.dumps(data)),
         )
         await db.commit()
         return cursor.lastrowid
@@ -106,8 +119,7 @@ async def insert_stack_secret(data: dict) -> int:
 async def get_stack_secrets(timestamp: str) -> Optional[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT data_json FROM stack_secrets WHERE timestamp = ?",
-            (timestamp,)
+            "SELECT data_json FROM stack_secrets WHERE timestamp = ?", (timestamp,)
         )
         row = await cursor.fetchone()
         if row:
@@ -134,32 +146,38 @@ def get_db_timestamps() -> Set[str]:
 def prune_db_by_timestamps(timestamps_to_delete: Set[str]):
     with sqlite3.connect(DB_PATH) as conn:
         # create temp table with timestamp ids that will be deleted
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TEMP TABLE IF NOT EXISTS timestamps_to_delete (
                 timestamp TEXT PRIMARY KEY
             )
-        """)
+        """
+        )
 
         conn.executemany(
             "INSERT OR IGNORE INTO timestamps_to_delete (timestamp) VALUES (?)",
-            ((ts,) for ts in timestamps_to_delete)
+            ((ts,) for ts in timestamps_to_delete),
         )
 
         # prune the two tables
-        conn.execute("""
+        conn.execute(
+            """
             DELETE FROM volume_meta
             WHERE EXISTS (
                 SELECT 1
                 FROM timestamps_to_delete d
                 WHERE d.timestamp = volume_meta.timestamp
             )
-        """)
+        """
+        )
 
-        conn.execute("""
+        conn.execute(
+            """
             DELETE FROM stack_secrets
             WHERE EXISTS (
                 SELECT 1
                 FROM timestamps_to_delete d
                 WHERE d.timestamp = stack_secrets.timestamp
             )
-        """)
+        """
+        )

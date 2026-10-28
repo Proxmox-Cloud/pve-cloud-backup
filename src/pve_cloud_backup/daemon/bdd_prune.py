@@ -5,11 +5,9 @@ import os
 import subprocess
 from pathlib import Path
 
+from pve_cloud_backup.daemon.db import (get_db_timestamps,
+                                        prune_db_by_timestamps)
 from pve_cloud_backup.daemon.funcs import get_backup_base_dir
-from pve_cloud_backup.daemon.db import (
-    get_db_timestamps,
-    prune_db_by_timestamps
-)
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -23,11 +21,14 @@ os.environ["BORG_RELOCATED_REPO_ACCESS_IS_OK"] = "yes"
 
 def prune_repo(repo_path: str, keep_daily: int, keep_weekly: int, keep_monthly: int):
     cmd = [
-        "borg", "prune", "-v", "--list",
+        "borg",
+        "prune",
+        "-v",
+        "--list",
         f"--keep-daily={keep_daily}",
         f"--keep-weekly={keep_weekly}",
         f"--keep-monthly={keep_monthly}",
-        repo_path
+        repo_path,
     ]
     subprocess.run(cmd, check=True)
 
@@ -43,9 +44,7 @@ def check_repo(repo_path: str, verify_data: bool):
 
 def borg_list_timestamps(archive_dir: str):
     list_result = subprocess.run(
-        ["borg", "list", archive_dir, "--json"],
-        capture_output=True,
-        check=True
+        ["borg", "list", archive_dir, "--json"], capture_output=True, check=True
     )
 
     timestamps = []
@@ -56,6 +55,7 @@ def borg_list_timestamps(archive_dir: str):
         timestamps.add(timestamp)
 
     return timestamps
+
 
 def collect_borg_timestamps(base_dir: str) -> set:
     borg_timestamps = set()
@@ -83,7 +83,9 @@ def prune_database(borg_timestamps: set):
     prune_db_by_timestamps(timestamps_to_delete)
 
 
-def run_maintenance(keep_daily: int, keep_weekly: int, keep_monthly: int, verify_data: bool):
+def run_maintenance(
+    keep_daily: int, keep_weekly: int, keep_monthly: int, verify_data: bool
+):
     base_dir = get_backup_base_dir()
 
     logger.info("performing prune and check on borg archives...")
@@ -107,7 +109,9 @@ def run_maintenance(keep_daily: int, keep_weekly: int, keep_monthly: int, verify
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Borg repository maintenance (prune + check)")
+    parser = argparse.ArgumentParser(
+        description="Borg repository maintenance (prune + check)"
+    )
     parser.add_argument(
         "--keep-daily",
         type=int,
@@ -131,4 +135,6 @@ def main():
     )
 
     args = parser.parse_args()
-    run_maintenance(args.keep_daily, args.keep_weekly, args.keep_monthly, args.verify_data)
+    run_maintenance(
+        args.keep_daily, args.keep_weekly, args.keep_monthly, args.verify_data
+    )

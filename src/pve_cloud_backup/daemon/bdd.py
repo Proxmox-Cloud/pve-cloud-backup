@@ -12,8 +12,8 @@ from pve_cloud_backup.daemon.db import (get_stack_secrets, get_volume_metas,
                                         init_db, insert_stack_secret,
                                         insert_volume_meta)
 from pve_cloud_backup.daemon.funcs import (copy_backup_generic,
-                                           init_backup_dir,
-                                           get_backup_base_dir)
+                                           get_backup_base_dir,
+                                           init_backup_dir)
 from pve_cloud_backup.fetcher.net import send_cchunk
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -204,9 +204,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 dict_size = struct.unpack("!I", (await reader.readexactly(4)))[0]
                 meta_dict = pickle.loads((await reader.readexactly(dict_size)))
 
-                await insert_volume_meta(
-                    meta_dict
-                )
+                await insert_volume_meta(meta_dict)
 
                 writer.write(b"\x01")
                 await writer.drain()
@@ -263,7 +261,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 stack_secrets = await get_stack_secrets(timestamp)
 
                 if not stack_secrets:
-                    raise RuntimeError(f"No stack secrets found for timestamp {timestamp}")
+                    raise RuntimeError(
+                        f"No stack secrets found for timestamp {timestamp}"
+                    )
 
                 meta_pickled = pickle.dumps(stack_secrets)
                 writer.write(struct.pack("!I", len(meta_pickled)))
